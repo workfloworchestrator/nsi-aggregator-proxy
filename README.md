@@ -5,8 +5,6 @@
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
-    direction TD
-
     [*] --> Reserving : Reserve
     state Reserving <<choice>>
     Reserving --> Reserved : success

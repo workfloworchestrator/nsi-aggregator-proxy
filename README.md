@@ -63,6 +63,29 @@ All fields are mandatory, except for `globalReservationId` and `serviceType`.
 
 See [API responses](#api-responses).
 
+#### Internal NSI state machine
+
+```mermaid
+%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
+stateDiagram-v2
+    [*] --> ReserveStart : POST /reservations
+    state ReserveStart <<choice>>
+    ReserveStart --> ReserveChecking : --> reserve
+    state ReserveChecking <<choice>>
+    ReserveChecking --> ReserveHeld : <-- reserveConfirmed
+    ReserveChecking --> ReserveFailed : <-- reserveFailed
+    ReserveHeld --> ReserveCommitting : --> reserveCommit
+    state ReserveCommitting <<choice>>
+    ReserveHeld --> ReserveTimeout : <-- reserveTimeout
+    ReserveCommitting --> ReserveCommitted : <-- reserveCommitConfirmed
+    ReserveCommitting --> ReserveCommitFailed : <-- reserveCommitFailed
+    ReserveFailed --> [*] :  status FAILED
+    ReserveCommitFailed --> [*] :  status FAILED
+    ReserveTimeout --> [*] :  status FAILED
+    ReserveCommitted --> [*] : status RESERVED
+
+```
+
 ### POST /reservations/{connectionId}/provision
 
 Provision a connection identified by connectionId, this is only allowed when
@@ -82,6 +105,25 @@ the `ACTIVATED` or the `FAILED` state.
 #### Response
 
 See [API responses](#api-responses).
+
+#### Internal NSI state machine
+
+```mermaid
+%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
+stateDiagram-v2
+    [*] --> ProvisionStart : POST /reservations/{connectionId}/provision
+    state ProvisionStart <<choice>>
+    ProvisionStart --> Provisioning : --> provision
+    state Provisioning <<choice>>
+    Provisioning --> Provisioned : <-- provisionConfirmed
+    state Provisioned <<choice>>
+    Provisioning --> ProvisionFailed : <-- error
+    Provisioned --> Activated : <-- dataPlaneStateChange up
+    Provisioned --> ActivationTimedOut : timeout
+    Activated --> [*] :  status ACTIVATED
+    ActivationTimedOut --> [*] :  status FAILED
+    ProvisionFailed --> [*] :  status FAILED
+```
 
 ### POST /reservations/{connectionId}/release
 
@@ -103,6 +145,25 @@ the `RESERVED` or the `FAILED` state.
 
 See [API responses](#api-responses).
 
+#### Internal NSI state machine
+
+```mermaid
+%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
+stateDiagram-v2
+    [*] --> ReleaseStart : POST /reservations/{connectionId}/release
+    state ReleaseStart <<choice>>
+    ReleaseStart --> Releasing : --> release
+    state Releasing <<choice>>
+    Releasing --> Released : <-- releaseConfirmed
+    state Released <<choice>>
+    Releasing --> ReleaseFailed : <-- error
+    Released --> Deactivated : <-- dataPlaneStateChange down
+    Released --> DeactivationTimedOut : timeout
+    Deactivated --> [*] :  status RESERVED
+    DeactivationTimedOut --> [*] :  status FAILED
+    ReleaseFailed --> [*] :  status FAILED
+```
+
 ### DELETE /reservations/{connectionId}
 
 Terminate a reserved connection identiefied by conection_id.  this is only
@@ -120,6 +181,21 @@ request is accepted, the reservations transitions to the `TERMINATED` state.
 #### Response
 
 See [API responses](#api-responses).
+
+#### Internal NSI state machine
+
+```mermaid
+%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
+stateDiagram-v2
+    [*] --> TerminateStart : DELETE /reservations/{connectionId}
+    state TerminateStart <<choice>>
+    TerminateStart --> Terminating : --> terminate
+    state Terminating <<choice>>
+    Terminating --> Terminated : <-- terminateConfirmed
+    Terminating --> TerminateFailed : <-- error
+    Terminated --> [*] :  status TERMINATED
+    TerminateFailed --> [*] :  status TERMINATED
+```
 
 ### GET /reservations/{connectionId}
 

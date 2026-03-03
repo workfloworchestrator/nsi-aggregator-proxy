@@ -83,7 +83,7 @@ the `ACTIVATED` or the `FAILED` state.
 
 See [API responses](#api-responses).
 
-### POST /reservations/{connection_id}/release
+### POST /reservations/{connectionId}/release
 
 Release a connection identiefied by conection_id.  this is only allowed when
 the reservation is in the `ACTIVATED` state. When the request is accepted, the
@@ -103,7 +103,7 @@ the `RESERVED` or the `FAILED` state.
 
 See [API responses](#api-responses).
 
-### DELETE /reservations/{connection_id}
+### DELETE /reservations/{connectionId}
 
 Terminate a reserved connection identiefied by conection_id.  this is only
 allowed when the reservation is in the `RESERVED` or `FAILED` state. When the
@@ -121,16 +121,16 @@ request is accepted, the reservations transitions to the `TERMINATED` state.
 
 See [API responses](#api-responses).
 
-### GET /reservations/{connection_id}
+### GET /reservations/{connectionId}
 
-Get the details of the reservation identified by connection_id.
+Get the details of the reservation identified by `connectionId`.
 
 #### Response
 
 ```json
   {
     "globalReservationId": "urn:uuid:5fa943ae-32e8-4faa-9080-0bbdc0f405e8"
-    "connection_id": "9adfed42-fa58-4d26-bf74-9f5e14ab2281"
+    "connectionId": "9adfed42-fa58-4d26-bf74-9f5e14ab2281"
     "description": "My first multi domain connection",
     "criteria": {
       "version": 1,
@@ -151,7 +151,7 @@ Get a list of all reservations and details.
 
 #### Response
 
-A list reservation details as returned by `GET /reservations/{connection_id}`.
+A list reservation details as returned by `GET /reservations/{connectionId}`.
 
 ```json
 {
@@ -233,4 +233,4 @@ the capacity is a negative number.
 
 ### Callback Payload
 
-A payload identical to the one returned by `GET /reservations/{connection_id}`.
+A payload identical to the one returned by `GET /reservations/{connectionId}`.

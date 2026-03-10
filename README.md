@@ -1,11 +1,13 @@
 # NSI Aggregator Proxy
 
 The NSI Aggregator Proxy offers a REST API to a single, simplified connection
-state machine, this in contrast with the multiple state machines needed to keep
-track of the NSI connection state. This proxy allows to reserve, provision,
-release and terminate a connection, and list all connections including details.
+state-machine. This in contrast with the multiple state machines needed to keep
+track of the NSI connection state when talking to an NSI Aggregator directly
+(like [Safnari](https://github.com/BandwidthOnDemand/nsi-safnari)).  This proxy
+allows to reserve, provision, release and terminate a connection, and list all
+connections including details.
 
-## Connection State Machine
+## Simplified Connection State Machine
 
 In the diagram below, the connection state machine is described. The Reserve,
 Provision, Release and Terminate actions map to the API endpoints described
@@ -127,8 +129,8 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/release
 
-Release a connection identiefied by conection_id.  this is only allowed when
-the reservation is in the `ACTIVATED` state. When the request is accepted, the
+Release a connection identified by conection_id.  this is only allowed when the
+reservation is in the `ACTIVATED` state. When the request is accepted, the
 reservations transitions to the `DEACTIVATING` state. The result of the request
 will be sent to `callbackURL`, and the reservation will either transition to
 the `RESERVED` or the `FAILED` state.
@@ -166,7 +168,7 @@ stateDiagram-v2
 
 ### DELETE /reservations/{connectionId}
 
-Terminate a reserved connection identiefied by conection_id.  this is only
+Terminate a reserved connection identified by conection_id.  this is only
 allowed when the reservation is in the `RESERVED` or `FAILED` state. When the
 request is accepted, the reservations transitions to the `TERMINATED` state.
 
@@ -227,7 +229,7 @@ Get a list of all reservations and details.
 
 #### Response
 
-A list reservation details as returned by `GET /reservations/{connectionId}`.
+A list of reservation details as returned by `GET /reservations/{connectionId}`.
 
 ```json
 {
@@ -274,14 +276,15 @@ invalid characters).
 
 #### 415 Unsupported Media Type
 
-Only JSON payload is accepted, set the Content-Type header to application/json.
+Only JSON payload is accepted, set the `Content-Type` header to
+`application/json; charset=utf-8`.
 
 ```json
 {
   "type": "https://github.com/workfloworchestrator/nsi-aggregator-proxy#415-unsupported-media-type",
   "title": "Unsupported Media Type",
   "status": 415,
-  "detail": "Only application/json is supported.",
+  "detail": "Only application/json with UTF-8 encoding is supported.",
   "path": "/reservations"
 }
 ```

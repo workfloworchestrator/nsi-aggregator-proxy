@@ -56,7 +56,32 @@ aggregator_proxy/
   logging_config.py  # structlog + stdlib unified logging pipeline
   routers/
     reservations.py  # All /reservations endpoints (POST, GET, DELETE)
+  nsi_soap/
+    namespaces.py    # Shared NSMAP dict for all NSI CS v2 XML namespaces
+    builder.py       # NsiHeader dataclass + build_reserve / build_reserve_commit /
+                     #   build_provision / build_release / build_terminate (lxml)
+    parser.py        # parse() dispatcher → typed dataclasses for every inbound
+                     #   message type; see module docstring for sync vs async classification
 ```
+
+### NSI SOAP layer
+
+The `nsi_soap` package handles the translation between the REST layer and the NSI CS v2 SOAP protocol spoken by the aggregator (e.g. Safnari).
+
+**Building requests** — pass an `NsiHeader` (requester/provider NSA URNs, replyTo URL, auto-generated correlationId) plus operation-specific arguments to the relevant `build_*` function; each returns UTF-8 XML bytes ready to POST.
+
+**Parsing responses** — call `parse(xml_bytes)` on any received SOAP envelope. It returns one of the typed dataclasses below; use a `match` statement in the caller to handle each case.
+
+| Dataclass | Sync/Async | Trigger |
+|---|---|---|
+| `ReserveResponse` | Sync | HTTP response to `reserve` |
+| `Acknowledgment` | Sync | HTTP response to `provision`, `release`, `terminate` |
+| `ReserveConfirmed` | Async callback | Reserve held, proxy must send `reserveCommit` |
+| `ReserveCommitConfirmed` | Async callback | State → RESERVED |
+| `ProvisionConfirmed` | Async callback | Awaiting `dataPlaneStateChange` |
+| `DataPlaneStateChange` | Async callback | `active=True` → ACTIVATED, `active=False` → RESERVED |
+| `ReleaseConfirmed` | Async callback | State → RESERVED |
+| `TerminateConfirmed` | Async callback | State → TERMINATED |
 
 ### Current implementation status
 

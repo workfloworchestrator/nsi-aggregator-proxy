@@ -16,6 +16,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]==0.135.1",
     "httpx==0.28.1",
+    "lxml==6.0.2",
     "pydantic-settings==2.13.1",
     "structlog==25.5.0",
     "uvicorn[standard]==0.41.0",
@@ -33,6 +34,7 @@ aggregator-proxy = "aggregator_proxy.main:run"
 
 [dependency-groups]
 dev = [
+    "lxml-stubs==0.5.1",
 ]
 
 [tool.pytest.ini_options]

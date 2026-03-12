@@ -1,8 +1,14 @@
 """Pydantic models for request and response payloads."""
 
+import re
 from enum import StrEnum
 
-from pydantic import AnyHttpUrl, BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+
+_UUID_URN_RE = re.compile(
+    r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -63,10 +69,26 @@ class ReservationRequest(BaseModel):
 
     globalReservationId: str | None = Field(
         default=None,
-        description="Optional globally unique reservation identifier.",
+        description=(
+            "Optional globally unique reservation identifier as a UUID URN "
+            "(ITU-T X.667 / RFC 4122), e.g. urn:uuid:550e8400-e29b-41d4-a716-446655440000."
+        ),
     )
     description: str
     criteria: Criteria
+    requesterNSA: str = Field(..., description="NSA URN of the requesting party.")
+
+    @field_validator("globalReservationId")
+    @classmethod
+    def validate_global_reservation_id(cls, v: str | None) -> str | None:
+        """Validate UUID URN format when globalReservationId is supplied."""
+        if v is not None and not _UUID_URN_RE.match(v):
+            raise ValueError(
+                "globalReservationId must be a UUID URN of the form "
+                "urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+            )
+        return v
+    providerNSA: str = Field(..., description="NSA URN of the target aggregator.")
     callbackURL: AnyHttpUrl = Field(
         ..., description="URL to receive the reservation result callback."
     )

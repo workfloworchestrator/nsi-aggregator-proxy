@@ -57,6 +57,8 @@ All fields are mandatory, except for `globalReservationId` and `serviceType`.
       "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
     }
   },
+  "requesterNSA": "urn:ogf:network:y.domain.topolevel:2021:requester",
+  "providerNSA": "urn:ogf:network:nsi.example.domain:2025:nsa:safnari",
   "callbackURL": "https://orchestrator.example.domain/callback"
 }
 ```

@@ -15,10 +15,15 @@ from aggregator_proxy.nsi_soap.parser import (
     ProvisionConfirmed,
     ReleaseConfirmed,
     ReserveCommitConfirmed,
+    ReserveCommitFailed,
     ReserveConfirmed,
+    ReserveFailed,
     ReserveResponse,
+    ReserveTimeout,
+    ServiceException,
     TerminateConfirmed,
     parse,
+    parse_correlation_id,
 )
 
 __all__ = [
@@ -34,8 +39,13 @@ __all__ = [
     "ProvisionConfirmed",
     "ReleaseConfirmed",
     "ReserveCommitConfirmed",
+    "ReserveCommitFailed",
     "ReserveConfirmed",
+    "ReserveFailed",
     "ReserveResponse",
+    "ReserveTimeout",
+    "ServiceException",
     "TerminateConfirmed",
     "parse",
+    "parse_correlation_id",
 ]

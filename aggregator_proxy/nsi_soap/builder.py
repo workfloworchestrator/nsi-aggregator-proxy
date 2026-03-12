@@ -45,7 +45,7 @@ def _serialize(envelope: etree._Element) -> bytes:
 
 def build_reserve(
     header: NsiHeader,
-    global_reservation_id: str,
+    global_reservation_id: str | None,
     description: str,
     capacity: int,
     source_stp: str,
@@ -57,7 +57,8 @@ def build_reserve(
     """Build a NSI reserve request envelope."""
     envelope, body = _build_envelope(header)
     reserve = etree.SubElement(body, f"{_C}reserve")
-    etree.SubElement(reserve, "globalReservationId").text = global_reservation_id
+    if global_reservation_id is not None:
+        etree.SubElement(reserve, "globalReservationId").text = global_reservation_id
     etree.SubElement(reserve, "description").text = description
     criteria = etree.SubElement(reserve, "criteria", version="1")
     schedule = etree.SubElement(criteria, "schedule")

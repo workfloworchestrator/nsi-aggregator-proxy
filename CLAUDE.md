@@ -77,6 +77,8 @@ The `nsi_soap` package handles the translation between the REST layer and the NS
 | `ReserveResponse` | Sync | HTTP response to `reserve` |
 | `Acknowledgment` | Sync | HTTP response to `provision`, `release`, `terminate` |
 | `ReserveConfirmed` | Async callback | Reserve held, proxy must send `reserveCommit` |
+| `ReserveFailed` | Async callback | State → FAILED; carries `ServiceException` (errorId + text per GFD.235) |
+| `ReserveTimeout` | Async callback | State → FAILED; reserve timed out before commit |
 | `ReserveCommitConfirmed` | Async callback | State → RESERVED |
 | `ProvisionConfirmed` | Async callback | Awaiting `dataPlaneStateChange` |
 | `DataPlaneStateChange` | Async callback | `active=True` → ACTIVATED, `active=False` → RESERVED |
@@ -91,10 +93,13 @@ All router endpoints are stubbed with `# TODO` comments — the NSI aggregator c
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `AGGREGATOR_PROXY_AGGREGATOR_URL` | Yes | — | Base URL of the NSI aggregator |
+| `AGGREGATOR_PROXY_PROVIDER_URL` | Yes | — | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
+| `AGGREGATOR_PROXY_BASE_URL` | Yes | — | Externally reachable base URL of this proxy; `/nsi/v2/callback` is appended to form the `replyTo` in outbound SOAP headers |
 | `AGGREGATOR_PROXY_CLIENT_CERT` | No | None | Path to client TLS certificate |
 | `AGGREGATOR_PROXY_CLIENT_KEY` | No | None | Path to client TLS private key |
 | `AGGREGATOR_PROXY_CA_FILE` | No | None | Path to CA bundle for server verification |
+| `AGGREGATOR_PROXY_RESERVE_TIMEOUT` | No | `60` | Seconds to wait for `reserveConfirmed` callback |
+| `AGGREGATOR_PROXY_COMMIT_TIMEOUT` | No | `60` | Seconds to wait for `reserveCommitConfirmed` callback |
 | `AGGREGATOR_PROXY_LOG_LEVEL` | No | `INFO` | Log level |
 | `AGGREGATOR_PROXY_HOST` | No | `0.0.0.0` | Bind host |
 | `AGGREGATOR_PROXY_PORT` | No | `8080` | Bind port |

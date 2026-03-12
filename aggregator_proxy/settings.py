@@ -14,7 +14,8 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="AGGREGATOR_PROXY_")
 
-    aggregator_url: str
+    # Full URL of the NSI provider endpoint on the aggregator.
+    provider_url: str
 
     # Client certificate authentication towards the NSI aggregator.
     # When not set, no client certificate is presented.
@@ -24,6 +25,14 @@ class Settings(BaseSettings):
     # CA bundle used to verify the NSI aggregator's server certificate.
     # When not set, the system CA bundle is used.
     ca_file: Path | None = None
+
+    # Externally reachable base URL of this proxy (e.g. https://proxy.example.com).
+    # Used to construct the replyTo URL in outbound NSI SOAP headers.
+    base_url: str
+
+    # Timeouts (seconds) for waiting on async NSI callbacks.
+    reserve_timeout: int = 60
+    commit_timeout: int = 60
 
     log_level: str = "INFO"
     host: str = "0.0.0.0"

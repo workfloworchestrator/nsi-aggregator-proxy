@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 import structlog
 import uvicorn
 from fastapi import FastAPI
@@ -11,7 +12,9 @@ from fastapi.responses import Response
 
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.nsi_client import create_nsi_client
+from aggregator_proxy.reservation_store import ReservationStore
 from aggregator_proxy.routers import reservations
+from aggregator_proxy.routers.nsi_callback import router as nsi_callback_router
 from aggregator_proxy.settings import settings
 
 logger = structlog.get_logger(__name__)
@@ -23,14 +26,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
     logger.info(
         "Starting NSI Aggregator Proxy",
-        aggregator_url=settings.aggregator_url,
+        provider_url=settings.provider_url,
         host=settings.host,
         port=settings.port,
     )
     app.state.nsi_client = create_nsi_client()
+    app.state.callback_client = httpx.AsyncClient()
+    app.state.reservation_store = ReservationStore()
     yield
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()
+    await app.state.callback_client.aclose()
 
 
 app = FastAPI(
@@ -44,6 +50,7 @@ app = FastAPI(
 )
 
 app.include_router(reservations.router)
+app.include_router(nsi_callback_router)
 
 
 @app.get("/health", status_code=200, include_in_schema=False)

@@ -63,15 +63,17 @@ async def _send_callback(
         criteria=reservation.criteria,
         status=reservation.status,
     )
+    payload = detail.model_dump()
+    logger.debug("Outbound JSON callback", callback_url=callback_url, json=payload)
     try:
-        await callback_client.post(callback_url, json=detail.model_dump())
+        await callback_client.post(callback_url, json=payload)
     except Exception as exc:
         logger.error("Failed to deliver callback", callback_url=callback_url, error=str(exc))
 
 
 async def _complete_reserve(
     connection_id: str,
-    reserve_future: asyncio.Future,  # type: ignore[type-arg]
+    reserve_future: asyncio.Future,
     nsi_client: httpx.AsyncClient,
     callback_client: httpx.AsyncClient,
     store: ReservationStore,
@@ -127,6 +129,7 @@ async def _complete_reserve(
             correlation_id=commit_correlation_id,
         )
         soap_bytes = build_reserve_commit(header, connection_id)
+        log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
         try:
             response = await nsi_client.post(
                 settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS
@@ -137,6 +140,8 @@ async def _complete_reserve(
             log.error("Failed to send reserveCommit to aggregator", error=str(exc))
             await fail("failed to send reserveCommit to aggregator")
             return
+
+        log.debug("Inbound SOAP reserveCommit response", xml=response.text)
 
         try:
             commit_msg = await asyncio.wait_for(commit_future, timeout=settings.commit_timeout)
@@ -193,6 +198,7 @@ async def create_reservation(
         callback_url=str(body.callbackURL),
     )
     log.info("Reserve request received")
+    log.debug("JSON request body", json=body.model_dump(mode="json"))
 
     correlation_id = f"urn:uuid:{uuid4()}"
     # Register the future BEFORE sending the SOAP request so the callback
@@ -218,6 +224,8 @@ async def create_reservation(
         service_type=body.criteria.serviceType or _DEFAULT_SERVICE_TYPE,
     )
 
+    log.debug("Outbound SOAP reserve request", xml=soap_bytes.decode())
+
     try:
         response = await nsi_client.post(
             settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS
@@ -227,6 +235,8 @@ async def create_reservation(
         store.cancel_pending(correlation_id)
         logger.error("Failed to send reserve request to aggregator", error=str(exc))
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator")
+
+    log.debug("Inbound SOAP reserve response", xml=response.text)
 
     sync_msg = parse(response.content)
     if not isinstance(sync_msg, ReserveResponse):
@@ -289,6 +299,7 @@ async def provision_reservation(
     (``ACTIVATED`` or ``FAILED``) is delivered to ``callbackURL``.
     """
     logger.info("Provision request received", connection_id=connectionId, callback_url=str(body.callbackURL))
+    logger.debug("JSON request body", json=body.model_dump(mode="json"))
 
     # TODO: validate state, send NSI provision request to aggregator
 
@@ -316,6 +327,7 @@ async def release_reservation(
     (``RESERVED`` or ``FAILED``) is delivered to ``callbackURL``.
     """
     logger.info("Release request received", connection_id=connectionId, callback_url=str(body.callbackURL))
+    logger.debug("JSON request body", json=body.model_dump(mode="json"))
 
     # TODO: validate state, send NSI release request to aggregator
 
@@ -343,6 +355,7 @@ async def terminate_reservation(
     is delivered to ``callbackURL``.
     """
     logger.info("Terminate request received", connection_id=connectionId, callback_url=str(body.callbackURL))
+    logger.debug("JSON request body", json=body.model_dump(mode="json"))
 
     # TODO: validate state, send NSI terminate request to aggregator
 

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,12 @@ class Settings(BaseSettings):
     # Used to construct the replyTo URL in outbound NSI SOAP headers.
     base_url: str
 
+    @field_validator("base_url")
+    @classmethod
+    def strip_trailing_slash(cls, v: str) -> str:
+        """Remove trailing slash to avoid double slashes when appending paths."""
+        return v.rstrip("/")
+
     # Timeouts (seconds) for waiting on async NSI callbacks.
     reserve_timeout: int = 60
     commit_timeout: int = 60
@@ -39,4 +46,4 @@ class Settings(BaseSettings):
     port: int = 8080
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]

@@ -10,6 +10,20 @@ _UUID_URN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Network URN (NURN) for Service Termination Points.
+# Format: urn:ogf:network:<FQDN>:<DATE>:<OPAQUE>[?vlan=<RANGE>][#<FRAGMENT>]
+# DATE is YEAR with optional MONTH and DAY (e.g. 2013, 201307, 20130701).
+# RANGE is one or more VLAN numbers or ranges (e.g. 1779, 1020-1039, 100,200-300).
+_VLAN_RANGE = r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*"
+_STP_RE = re.compile(
+    r"^urn:ogf:network:"
+    r"[A-Za-z0-9.\-]+:"           # FQDN
+    r"[0-9]{4}(?:[0-9]{2}(?:[0-9]{2})?)?"  # DATE: YYYY[MM[DD]]
+    r":[A-Za-z0-9_.:\-]+"         # OPAQUE-PART
+    r"(?:\?vlan=" + _VLAN_RANGE + r")?"  # optional ?vlan=RANGE
+    r"(?:#[A-Za-z0-9_.:\-]+)?$",  # optional #FRAGMENT
+)
+
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -39,6 +53,17 @@ class P2PS(BaseModel):
     capacity: int = Field(..., gt=0, description="Requested capacity in Mbit/s.")
     sourceSTP: str = Field(..., description="Source Service Termination Point.")
     destSTP: str = Field(..., description="Destination Service Termination Point.")
+
+    @field_validator("sourceSTP", "destSTP")
+    @classmethod
+    def validate_stp(cls, v: str) -> str:
+        """Validate STP is a well-formed Network URN (NURN)."""
+        if not _STP_RE.match(v):
+            raise ValueError(
+                "STP must be a Network URN of the form "
+                "urn:ogf:network:<FQDN>:<DATE>:<OPAQUE-PART>[?vlan=<RANGE>]"
+            )
+        return v
 
 
 class Criteria(BaseModel):

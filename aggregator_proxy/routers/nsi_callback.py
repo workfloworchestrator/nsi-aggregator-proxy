@@ -28,6 +28,7 @@ async def nsi_callback(
 ) -> Response:
     """Receive an async NSI callback from the aggregator and dispatch it."""
     xml_bytes = await request.body()
+    logger.debug("Inbound NSI callback XML", xml=xml_bytes.decode(errors="replace"))
 
     try:
         correlation_id = parse_correlation_id(xml_bytes)

@@ -293,7 +293,7 @@ def parse_correlation_id(xml_bytes: bytes) -> str:
     across different NSI aggregator implementations.
     """
     root = etree.fromstring(xml_bytes)
-    results = root.xpath(
+    results: list[str] = root.xpath(  # type: ignore[assignment]
         "//*[local-name()='nsiHeader']/*[local-name()='correlationId']/text()"
     )
     if not results:

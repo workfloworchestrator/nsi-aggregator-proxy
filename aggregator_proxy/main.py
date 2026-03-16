@@ -1,6 +1,7 @@
 """FastAPI application and entry point."""
 
-import logging
+import importlib.metadata
+import platform
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -19,16 +20,20 @@ from aggregator_proxy.settings import settings
 
 logger = structlog.get_logger(__name__)
 
+APP_VERSION = importlib.metadata.version("aggregator-proxy")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Configure logging and shared resources on startup."""
     configure_logging()
     logger.info(
-        "Starting NSI Aggregator Proxy",
-        provider_url=settings.provider_url,
-        host=settings.host,
-        port=settings.port,
+        "Starting NSI Aggregator Proxy %s using Python %s (%s) on %s",
+        APP_VERSION,
+        platform.python_version(),
+        platform.python_implementation(),
+        platform.node(),
+        **settings.model_dump(mode="json"),
     )
     app.state.nsi_client = create_nsi_client()
     app.state.callback_client = httpx.AsyncClient()
@@ -45,7 +50,7 @@ app = FastAPI(
         "REST proxy exposing a simplified connection state-machine "
         "on top of an NSI aggregator."
     ),
-    version="0.1.1.dev1",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 

@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 
-from aggregator_proxy.models import CriteriaResponse, P2PS, ReservationStatus
+from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
 from aggregator_proxy.nsi_soap.parser import NsiMessage, ReserveConfirmed
 
 
@@ -34,6 +34,7 @@ class ReservationStore:
         """Initialise empty stores."""
         self._reservations: dict[str, Reservation] = {}
         self._pending: dict[str, asyncio.Future[NsiMessage]] = {}
+        self._pending_by_connection: dict[str, asyncio.Future[NsiMessage]] = {}
 
     # ------------------------------------------------------------------
     # Reservation CRUD
@@ -93,5 +94,30 @@ class ReservationStore:
     def cancel_pending(self, correlation_id: str) -> None:
         """Cancel and remove a pending Future (cleanup on send failure)."""
         future = self._pending.pop(correlation_id, None)
+        if future is not None and not future.done():
+            future.cancel()
+
+    # ------------------------------------------------------------------
+    # Pending connection-based tracking (for notifications like
+    # DataPlaneStateChange where the correlationId is aggregator-generated)
+    # ------------------------------------------------------------------
+
+    def register_pending_by_connection(self, connection_id: str) -> asyncio.Future[NsiMessage]:
+        """Create and register a Future keyed by connectionId."""
+        future: asyncio.Future[NsiMessage] = asyncio.get_running_loop().create_future()
+        self._pending_by_connection[connection_id] = future
+        return future
+
+    def resolve_pending_by_connection(self, connection_id: str, message: NsiMessage) -> bool:
+        """Set the result on a connection-keyed Future; returns True if one was found."""
+        future = self._pending_by_connection.pop(connection_id, None)
+        if future is None or future.done():
+            return False
+        future.set_result(message)
+        return True
+
+    def cancel_pending_by_connection(self, connection_id: str) -> None:
+        """Cancel and remove a connection-keyed pending Future."""
+        future = self._pending_by_connection.pop(connection_id, None)
         if future is not None and not future.done():
             future.cancel()

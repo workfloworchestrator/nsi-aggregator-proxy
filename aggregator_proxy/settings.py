@@ -38,8 +38,8 @@ class Settings(BaseSettings):
         return v.rstrip("/")
 
     # Timeouts (seconds) for waiting on async NSI callbacks.
-    reserve_timeout: int = 60
-    commit_timeout: int = 60
+    nsi_timeout: int = 180
+    dataplane_timeout: int = 300
 
     log_level: str = "INFO"
     host: str = "0.0.0.0"

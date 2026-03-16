@@ -17,17 +17,22 @@ from aggregator_proxy.models import (
     CriteriaResponse,
     ReservationDetail,
     ReservationRequest,
-    ReservationStatus,
     ReservationsListResponse,
+    ReservationStatus,
 )
 from aggregator_proxy.nsi_soap import (
+    Acknowledgment,
+    DataPlaneStateChange,
     NsiHeader,
+    NsiMessage,
+    ProvisionConfirmed,
     ReserveCommitConfirmed,
     ReserveCommitFailed,
     ReserveConfirmed,
     ReserveFailed,
     ReserveResponse,
     ReserveTimeout,
+    build_provision,
     build_reserve,
     build_reserve_commit,
     parse,
@@ -97,15 +102,13 @@ async def _complete_reserve(
     try:
         # --- Phase 1: wait for reserveConfirmed / failure ---
         try:
-            msg = await asyncio.wait_for(reserve_future, timeout=settings.reserve_timeout)
+            msg = await asyncio.wait_for(reserve_future, timeout=settings.nsi_timeout)
         except asyncio.TimeoutError:
             await fail("no reserveConfirmed received within timeout")
             return
 
         if isinstance(msg, ReserveFailed):
-            await fail(
-                f"reserveFailed [{msg.service_exception.error_id}]: {msg.service_exception.text}"
-            )
+            await fail(f"reserveFailed [{msg.service_exception.error_id}]: {msg.service_exception.text}")
             return
 
         if isinstance(msg, ReserveTimeout):
@@ -131,9 +134,7 @@ async def _complete_reserve(
         soap_bytes = build_reserve_commit(header, connection_id)
         log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
         try:
-            response = await nsi_client.post(
-                settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS
-            )
+            response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
             response.raise_for_status()
         except Exception as exc:
             store.cancel_pending(commit_correlation_id)
@@ -144,15 +145,14 @@ async def _complete_reserve(
         log.debug("Inbound SOAP reserveCommit response", xml=response.text)
 
         try:
-            commit_msg = await asyncio.wait_for(commit_future, timeout=settings.commit_timeout)
+            commit_msg = await asyncio.wait_for(commit_future, timeout=settings.nsi_timeout)
         except asyncio.TimeoutError:
             await fail("no reserveCommitConfirmed received within timeout")
             return
 
         if isinstance(commit_msg, ReserveCommitFailed):
             await fail(
-                f"reserveCommitFailed [{commit_msg.service_exception.error_id}]: "
-                f"{commit_msg.service_exception.text}"
+                f"reserveCommitFailed [{commit_msg.service_exception.error_id}]: {commit_msg.service_exception.text}"
             )
             return
 
@@ -227,9 +227,7 @@ async def create_reservation(
     log.debug("Outbound SOAP reserve request", xml=soap_bytes.decode())
 
     try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS
-        )
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
         response.raise_for_status()
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -281,6 +279,77 @@ async def create_reservation(
     )
 
 
+async def _complete_provision(
+    connection_id: str,
+    provision_future: asyncio.Future[NsiMessage],
+    callback_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> None:
+    """Background task: drive the reservation from ACTIVATING to ACTIVATED or FAILED.
+
+    Phase 1 — wait for ProvisionConfirmed (timeout: nsi_timeout).
+    Phase 2 — loop waiting for DataPlaneStateChange(active=True) (timeout: dataplane_timeout).
+    """
+    log = logger.bind(connection_id=connection_id)
+
+    async def fail(reason: str) -> None:
+        store.update_status(connection_id, ReservationStatus.FAILED)
+        reservation = store.get(connection_id)
+        if reservation is not None:
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+        log.info("Provision failed", reason=reason)
+
+    try:
+        # --- Phase 1: wait for provisionConfirmed ---
+        try:
+            msg = await asyncio.wait_for(provision_future, timeout=settings.nsi_timeout)
+        except asyncio.TimeoutError:
+            await fail("no provisionConfirmed received within timeout")
+            return
+
+        if not isinstance(msg, ProvisionConfirmed):
+            await fail(f"unexpected message: {type(msg).__name__}")
+            return
+
+        log.info("Provision confirmed, waiting for dataPlaneStateChange")
+
+        # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
+        remaining = float(settings.dataplane_timeout)
+        while remaining > 0:
+            dp_future = store.register_pending_by_connection(connection_id)
+            start = asyncio.get_event_loop().time()
+            try:
+                dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
+            except asyncio.TimeoutError:
+                store.cancel_pending_by_connection(connection_id)
+                await fail("no DataPlaneStateChange(active=True) received within timeout")
+                return
+
+            elapsed = asyncio.get_event_loop().time() - start
+            remaining -= elapsed
+
+            if not isinstance(dp_msg, DataPlaneStateChange):
+                log.warning("Unexpected message while waiting for dataPlaneStateChange", msg_type=type(dp_msg).__name__)
+                continue
+
+            if dp_msg.active:
+                store.update_status(connection_id, ReservationStatus.ACTIVATED)
+                reservation = store.get(connection_id)
+                if reservation is not None:
+                    await _send_callback(callback_client, reservation.callback_url, reservation)
+                log.info("Data plane active, state is ACTIVATED")
+                return
+
+            log.info("DataPlaneStateChange active=False, continuing to wait")
+
+        await fail("no DataPlaneStateChange(active=True) received within timeout")
+
+    except Exception:
+        log.exception("Unexpected error in _complete_provision")
+        with contextlib.suppress(Exception):
+            await fail("internal error")
+
+
 @router.post(
     "/{connectionId}/provision",
     status_code=status.HTTP_202_ACCEPTED,
@@ -291,6 +360,8 @@ async def provision_reservation(
     connectionId: str,
     body: CallbackRequest,
     nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
+    callback_client: httpx.AsyncClient = Depends(get_callback_client),
+    store: ReservationStore = Depends(get_reservation_store),
 ) -> JSONResponse:
     """Provision the connection identified by ``connectionId``.
 
@@ -298,10 +369,57 @@ async def provision_reservation(
     On acceptance it transitions to ``ACTIVATING``.  The final result
     (``ACTIVATED`` or ``FAILED``) is delivered to ``callbackURL``.
     """
-    logger.info("Provision request received", connection_id=connectionId, callback_url=str(body.callbackURL))
-    logger.debug("JSON request body", json=body.model_dump(mode="json"))
+    log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
+    log.info("Provision request received")
+    log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    # TODO: validate state, send NSI provision request to aggregator
+    reservation = store.get(connectionId)
+    if reservation is None:
+        raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
+    if reservation.status != ReservationStatus.RESERVED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reservation is in {reservation.status} state, must be RESERVED to provision",
+        )
+
+    reservation.callback_url = str(body.callbackURL)
+
+    correlation_id = f"urn:uuid:{uuid4()}"
+    provision_future = store.register_pending(correlation_id)
+
+    header = NsiHeader(
+        requester_nsa=reservation.requester_nsa,
+        provider_nsa=reservation.provider_nsa,
+        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
+        correlation_id=correlation_id,
+    )
+    soap_bytes = build_provision(header, connectionId)
+    log.debug("Outbound SOAP provision request", xml=soap_bytes.decode())
+
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response.raise_for_status()
+    except Exception as exc:
+        store.cancel_pending(correlation_id)
+        log.error("Failed to send provision request to aggregator", error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+
+    log.debug("Inbound SOAP provision response", xml=response.text)
+
+    sync_msg = parse(response.content)
+    if not isinstance(sync_msg, Acknowledgment):
+        store.cancel_pending(correlation_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+        )
+
+    store.update_status(connectionId, ReservationStatus.ACTIVATING)
+
+    asyncio.create_task(
+        _complete_provision(connectionId, provision_future, callback_client, store),
+        name=f"provision-{connectionId}",
+    )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,

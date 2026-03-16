@@ -10,8 +10,10 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency and environmen
 # Install dependencies
 uv sync
 
-# Run the application (requires AGGREGATOR_PROXY_AGGREGATOR_URL to be set)
-AGGREGATOR_PROXY_AGGREGATOR_URL=https://aggregator.example.com uv run aggregator-proxy
+# Run the application (requires AGGREGATOR_PROXY_PROVIDER_URL and AGGREGATOR_PROXY_BASE_URL)
+AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+  uv run aggregator-proxy
 
 # Run tests
 uv run pytest
@@ -42,7 +44,7 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 - **mTLS support**: the `httpx.AsyncClient` (created in `nsi_client.py`) can be configured with a client certificate/key pair and a custom CA bundle for mutual TLS against the aggregator.
 - **Shared client via app state**: the `httpx.AsyncClient` is created at startup in the `lifespan` context manager (`main.py`) and stored in `app.state.nsi_client`. Routers access it through the `get_nsi_client` FastAPI dependency (`dependencies.py`).
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
-- **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The only required variable is `AGGREGATOR_PROXY_AGGREGATOR_URL`.
+- **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL` and `AGGREGATOR_PROXY_BASE_URL`.
 
 ### Module layout
 
@@ -56,6 +58,7 @@ aggregator_proxy/
   logging_config.py  # structlog + stdlib unified logging pipeline
   routers/
     reservations.py  # All /reservations endpoints (POST, GET, DELETE)
+    nsi_callback.py  # POST /nsi/v2/callback — receives async NSI callbacks
   nsi_soap/
     namespaces.py    # Shared NSMAP dict for all NSI CS v2 XML namespaces
     builder.py       # NsiHeader dataclass + build_reserve / build_reserve_commit /
@@ -87,7 +90,7 @@ The `nsi_soap` package handles the translation between the REST layer and the NS
 
 ### Current implementation status
 
-All router endpoints are stubbed with `# TODO` comments — the NSI aggregator calls, state persistence, and callback delivery are not yet implemented. The skeleton accepts requests and returns 202 responses but does not interact with an actual NSI aggregator.
+`POST /reservations` and `POST /reservations/{connectionId}/provision` are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. The remaining endpoints (`GET`, `DELETE`, release, terminate) are stubbed with `# TODO` comments and return 202 responses without interacting with the aggregator.
 
 ### Configuration reference
 
@@ -98,8 +101,8 @@ All router endpoints are stubbed with `# TODO` comments — the NSI aggregator c
 | `AGGREGATOR_PROXY_CLIENT_CERT` | No | None | Path to client TLS certificate |
 | `AGGREGATOR_PROXY_CLIENT_KEY` | No | None | Path to client TLS private key |
 | `AGGREGATOR_PROXY_CA_FILE` | No | None | Path to CA bundle for server verification |
-| `AGGREGATOR_PROXY_RESERVE_TIMEOUT` | No | `60` | Seconds to wait for `reserveConfirmed` callback |
-| `AGGREGATOR_PROXY_COMMIT_TIMEOUT` | No | `60` | Seconds to wait for `reserveCommitConfirmed` callback |
+| `AGGREGATOR_PROXY_NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `AGGREGATOR_PROXY_DATAPLANE_TIMEOUT` | No | `300` | Seconds to wait for `DataPlaneStateChange(active=True)` after provision |
 | `AGGREGATOR_PROXY_LOG_LEVEL` | No | `INFO` | Log level |
 | `AGGREGATOR_PROXY_HOST` | No | `0.0.0.0` | Bind host |
 | `AGGREGATOR_PROXY_PORT` | No | `8080` | Bind port |

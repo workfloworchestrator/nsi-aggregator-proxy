@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
 from aggregator_proxy.dependencies import get_reservation_store
-from aggregator_proxy.nsi_soap import parse, parse_correlation_id
+from aggregator_proxy.nsi_soap import DataPlaneStateChange, parse, parse_correlation_id
 from aggregator_proxy.reservation_store import ReservationStore
 
 logger = structlog.get_logger(__name__)
@@ -38,6 +38,10 @@ async def nsi_callback(
         return Response(status_code=400)
 
     resolved = store.resolve_pending(correlation_id, message)
+
+    if isinstance(message, DataPlaneStateChange):
+        resolved = store.resolve_pending_by_connection(message.connection_id, message) or resolved
+
     if not resolved:
         logger.warning(
             "Received NSI callback for unknown correlationId",

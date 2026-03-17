@@ -1,17 +1,12 @@
 # NSI Aggregator Proxy
 
-The NSI Aggregator Proxy offers a REST API to a single, simplified connection
-state-machine. This in contrast with the multiple state machines needed to keep
-track of the NSI connection state when talking to an NSI Aggregator directly
-(like [Safnari](https://github.com/BandwidthOnDemand/nsi-safnari)).  This proxy
-allows to reserve, provision, release and terminate a connection, and list all
-connections including details.
+A REST API proxy that sits in front of an NSI (Network Service Interface) aggregator such as [Safnari](https://github.com/BandwidthOnDemand/nsi-safnari). Instead of requiring clients to implement the complex multi-state-machine NSI CS v2 SOAP protocol, this proxy exposes a simplified JSON/REST interface with a single connection state machine.
+
+The proxy handles all NSI protocol complexity internally: it translates REST calls into NSI SOAP messages, manages asynchronous NSI callbacks, automatically commits reservations, tracks data plane state changes, and delivers results to a caller-specified callback URL.
 
 ## Simplified Connection State Machine
 
-In the diagram below, the connection state machine is described. The Reserve,
-Provision, Release and Terminate actions map to the API endpoints described
-below.
+The proxy reduces the NSI protocol's multiple concurrent state machines (reservation, provision, lifecycle, data plane) into a single linear state machine:
 
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
@@ -23,27 +18,127 @@ stateDiagram-v2
     FAILED --> TERMINATED : Terminate
     RESERVED --> ACTIVATING : Provision
     state ACTIVATING <<choice>>
-    ACTIVATING --> ACTIVATED : succes
+    ACTIVATING --> ACTIVATED : success
     ACTIVATING --> FAILED : fail
     ACTIVATED --> DEACTIVATING : Release
     state DEACTIVATING <<choice>>
     DEACTIVATING --> RESERVED : success
     DEACTIVATING --> FAILED : fail
     RESERVED --> TERMINATED : Terminate
-``` 
+```
+
+| State | Description |
+|---|---|
+| `RESERVING` | Reserve request sent to the aggregator, waiting for confirmation and commit |
+| `RESERVED` | Reservation committed and confirmed, ready to be provisioned or terminated |
+| `ACTIVATING` | Provision request sent, waiting for data plane to come up |
+| `ACTIVATED` | Data plane is active, connection is fully operational |
+| `DEACTIVATING` | Release request sent, waiting for data plane to go down |
+| `FAILED` | An error occurred; the connection can be terminated from this state |
+| `TERMINATED` | Connection has been terminated; terminal state |
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/) (recommended) for dependency management
+
+### Running Locally with uv
+
+```bash
+# Install dependencies
+uv sync
+
+# Run the application
+AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+  uv run aggregator-proxy
+```
+
+The proxy starts on `http://0.0.0.0:8080` by default. On startup, it queries the aggregator for all existing reservations to populate its in-memory store.
+
+### Running with Docker
+
+```bash
+# Build the image
+docker build -t nsi-aggregator-proxy .
+
+# Run the container
+docker run -p 8080:8080 \
+  -e AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  -e AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  -e AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  -e AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+  nsi-aggregator-proxy
+```
+
+For mTLS, mount the certificate files into the container and set the corresponding environment variables:
+
+```bash
+docker run -p 8080:8080 \
+  -v /path/to/certs:/certs:ro \
+  -e AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  -e AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  -e AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  -e AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+  -e AGGREGATOR_PROXY_CLIENT_CERT=/certs/client-certificate.pem \
+  -e AGGREGATOR_PROXY_CLIENT_KEY=/certs/client-private-key.pem \
+  -e AGGREGATOR_PROXY_CA_FILE=/certs/ca-bundle.pem \
+  nsi-aggregator-proxy
+```
+
+### Deploying with Helm on Kubernetes
+
+A Helm chart is included in the `chart/` directory.
+
+```bash
+helm install nsi-aggregator-proxy ./chart \
+  --set env.AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  --set env.AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  --set env.AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  --set env.AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com
+```
+
+The chart supports Ingress and Gateway API HTTPRoute for external access. See `chart/values.yaml` for all available options including mTLS certificate mounting via volumes and volume mounts.
+
+## Configuration
+
+All configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix.
+
+### Required Variables
+
+| Variable | Description |
+|---|---|
+| `AGGREGATOR_PROXY_PROVIDER_URL` | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
+| `AGGREGATOR_PROXY_REQUESTER_NSA` | NSA URN used as `requesterNSA` in query requests to the aggregator |
+| `AGGREGATOR_PROXY_PROVIDER_NSA` | NSA URN of the aggregator; used as `providerNSA` in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
+| `AGGREGATOR_PROXY_BASE_URL` | Externally reachable base URL of this proxy (e.g. `https://proxy.example.com`); `/nsi/v2/callback` is appended to form the `replyTo` address in outbound SOAP headers |
+
+### Optional Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGGREGATOR_PROXY_CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator |
+| `AGGREGATOR_PROXY_CLIENT_KEY` | — | Path to client TLS private key |
+| `AGGREGATOR_PROXY_CA_FILE` | — | Path to CA bundle for server certificate verification |
+| `AGGREGATOR_PROXY_NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `AGGREGATOR_PROXY_DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
+| `AGGREGATOR_PROXY_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `AGGREGATOR_PROXY_HOST` | `0.0.0.0` | Bind host |
+| `AGGREGATOR_PROXY_PORT` | `8080` | Bind port |
 
 ## API Endpoints
 
 ### POST /reservations
 
-Reserve a connection using the parameters from the input payload. When the
-request is accepted, the reservations transitions to the `RESERVING` state. The
-result of the request will be sent to `callbackURL`, and the reservation will
-either transition to the `RESERVED` or the `FAILED` state.
+Reserve a connection. On acceptance the reservation transitions to `RESERVING`. The proxy sends the NSI `reserve` request, waits for `reserveConfirmed`, automatically sends `reserveCommit`, waits for `reserveCommitConfirmed`, and delivers the final result (`RESERVED` or `FAILED`) to the `callbackURL`.
 
-#### Input
+#### Request Body
 
-All fields are mandatory, except for `globalReservationId` and `serviceType`.
+All fields are required except `globalReservationId` and `serviceType`.
 
 ```json
 {
@@ -57,17 +152,29 @@ All fields are mandatory, except for `globalReservationId` and `serviceType`.
       "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
     }
   },
-  "requesterNSA": "urn:ogf:network:y.domain.topolevel:2021:requester",
+  "requesterNSA": "urn:ogf:network:y.domain.toplevel:2021:requester",
   "providerNSA": "urn:ogf:network:nsi.example.domain:2025:nsa:safnari",
   "callbackURL": "https://orchestrator.example.domain/callback"
 }
 ```
 
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `globalReservationId` | string | No | UUID URN (`urn:uuid:...`) to identify the reservation globally |
+| `description` | string | Yes | Human-readable description of the connection |
+| `criteria.serviceType` | string | No | NSI service type URN; defaults to `EVTS.A-GOLE` |
+| `criteria.p2ps.capacity` | integer | Yes | Requested capacity in Mbit/s (must be > 0) |
+| `criteria.p2ps.sourceSTP` | string | Yes | Source Service Termination Point (Network URN) |
+| `criteria.p2ps.destSTP` | string | Yes | Destination Service Termination Point (Network URN) |
+| `requesterNSA` | string | Yes | NSA URN of the requesting party |
+| `providerNSA` | string | Yes | NSA URN of the target aggregator; must match `AGGREGATOR_PROXY_PROVIDER_NSA` |
+| `callbackURL` | string | Yes | URL where the reservation result will be delivered |
+
 #### Response
 
-See [API responses](#api-responses).
+See [API Responses](#api-responses).
 
-#### Internal NSI state machine
+#### Internal NSI Flow
 
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
@@ -87,18 +194,13 @@ stateDiagram-v2
     ReserveCommitFailed --> [*] :  status FAILED
     ReserveTimeout --> [*] :  status FAILED
     ReserveCommitted --> [*] : status RESERVED
-
 ```
 
 ### POST /reservations/{connectionId}/provision
 
-Provision a connection identified by connectionId, this is only allowed when
-the reservation is in the `RESERVED` state. When the request is accepted, the
-reservations transitions to the `ACTIVATING` state. The result of the request
-will be sent to `callbackURL`, and the reservation will either transition to
-the `ACTIVATED` or the `FAILED` state.
+Provision a reserved connection to activate the data plane. Only allowed when the reservation is in the `RESERVED` state. On acceptance it transitions to `ACTIVATING`. The proxy waits for `provisionConfirmed` and then `DataPlaneStateChange(active=True)`, delivering the final result (`ACTIVATED` or `FAILED`) to the `callbackURL`.
 
-#### Input
+#### Request Body
 
 ```json
 {
@@ -108,9 +210,9 @@ the `ACTIVATED` or the `FAILED` state.
 
 #### Response
 
-See [API responses](#api-responses).
+See [API Responses](#api-responses).
 
-#### Internal NSI state machine
+#### Internal NSI Flow
 
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
@@ -131,13 +233,9 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/release
 
-Release a connection identified by conection_id.  this is only allowed when the
-reservation is in the `ACTIVATED` state. When the request is accepted, the
-reservations transitions to the `DEACTIVATING` state. The result of the request
-will be sent to `callbackURL`, and the reservation will either transition to
-the `RESERVED` or the `FAILED` state.
+Release an activated connection to deactivate the data plane. Only allowed when the reservation is in the `ACTIVATED` state. On acceptance it transitions to `DEACTIVATING`. The proxy waits for `releaseConfirmed` and then `DataPlaneStateChange(active=False)`, delivering the final result (`RESERVED` or `FAILED`) to the `callbackURL`.
 
-#### Input
+#### Request Body
 
 ```json
 {
@@ -147,9 +245,9 @@ the `RESERVED` or the `FAILED` state.
 
 #### Response
 
-See [API responses](#api-responses).
+See [API Responses](#api-responses).
 
-#### Internal NSI state machine
+#### Internal NSI Flow
 
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
@@ -170,11 +268,9 @@ stateDiagram-v2
 
 ### DELETE /reservations/{connectionId}
 
-Terminate a reserved connection identified by conection_id.  this is only
-allowed when the reservation is in the `RESERVED` or `FAILED` state. When the
-request is accepted, the reservations transitions to the `TERMINATED` state.
+Terminate a connection. Only allowed when the reservation is in the `RESERVED` or `FAILED` state. Both successful termination and timeout result in the `TERMINATED` state.
 
-#### Input
+#### Request Body
 
 ```json
 {
@@ -184,9 +280,9 @@ request is accepted, the reservations transitions to the `TERMINATED` state.
 
 #### Response
 
-See [API responses](#api-responses).
+See [API Responses](#api-responses).
 
-#### Internal NSI state machine
+#### Internal NSI Flow
 
 ```mermaid
 %%{init: {"look": "handDrawn", "theme": "neutral"}}%%
@@ -203,54 +299,76 @@ stateDiagram-v2
 
 ### GET /reservations/{connectionId}
 
-Get the details of the reservation identified by `connectionId`.
+Get the details of a single reservation. Before returning, the proxy queries the aggregator via `querySummarySync` and `queryNotificationSync` to ensure the state is up to date.
 
 #### Response
 
 ```json
-  {
-    "globalReservationId": "urn:uuid:5fa943ae-32e8-4faa-9080-0bbdc0f405e8"
-    "connectionId": "9adfed42-fa58-4d26-bf74-9f5e14ab2281"
-    "description": "My first multi domain connection",
-    "criteria": {
-      "version": 1,
-      "serviceType": "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
-      "p2ps": {
-        "capacity": 1000,
-        "sourceSTP": "urn:ogf:network:x.domain.toplevel:2020:topology:ps1?vlan=1790",
-        "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
-      }
-    },
-    "status": "ACTIVATED",
-    "lastError": null
-  }
+{
+  "globalReservationId": "urn:uuid:5fa943ae-32e8-4faa-9080-0bbdc0f405e8",
+  "connectionId": "9adfed42-fa58-4d26-bf74-9f5e14ab2281",
+  "description": "My first multi domain connection",
+  "criteria": {
+    "version": 1,
+    "serviceType": "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+    "p2ps": {
+      "capacity": 1000,
+      "sourceSTP": "urn:ogf:network:x.domain.toplevel:2020:topology:ps1?vlan=1790",
+      "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
+    }
+  },
+  "status": "ACTIVATED",
+  "lastError": null
+}
 ```
+
+| Field | Type | Description |
+|---|---|---|
+| `globalReservationId` | string or null | The global reservation identifier, if one was provided at creation |
+| `connectionId` | string | The connection identifier assigned by the aggregator |
+| `description` | string | Human-readable description |
+| `criteria` | object or null | Reservation criteria including version, service type, and point-to-point parameters |
+| `status` | string | Current state: `RESERVING`, `RESERVED`, `ACTIVATING`, `ACTIVATED`, `DEACTIVATING`, `FAILED`, or `TERMINATED` |
+| `lastError` | string or null | Human-readable description of the most recent error, if any |
 
 ### GET /reservations
 
-Get a list of all reservations and details.
+List all reservations. The proxy queries the aggregator to refresh all reservation states before returning.
 
 #### Response
-
-A list of reservation details as returned by `GET /reservations/{connectionId}`, including `lastError` for each reservation.
 
 ```json
 {
   "reservations": [
-    ....
+    {
+      "globalReservationId": "urn:uuid:5fa943ae-32e8-4faa-9080-0bbdc0f405e8",
+      "connectionId": "9adfed42-fa58-4d26-bf74-9f5e14ab2281",
+      "description": "My first multi domain connection",
+      "criteria": {
+        "version": 1,
+        "serviceType": "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+        "p2ps": {
+          "capacity": 1000,
+          "sourceSTP": "urn:ogf:network:x.domain.toplevel:2020:topology:ps1?vlan=1790",
+          "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
+        }
+      },
+      "status": "ACTIVATED",
+      "lastError": null
+    }
   ]
 }
 ```
 
+### GET /health
+
+Liveness probe endpoint. Returns `200 OK` with an empty body. Access logs for this endpoint are suppressed.
+
 ## API Responses
 
-### On Requests
+### Accepted (202)
 
-#### 202 Accepted
-
-The request is syntactically correct, passed the initial validation of the
-payload, and has been accepted. The result of the request will be send to
-`callbackURL`.
+Returned by `POST /reservations`, `POST .../provision`, `POST .../release`, and `DELETE .../`. The request has been accepted and the operation is in progress. The final result will be delivered to the `callbackURL`.
 
 ```json
 {
@@ -262,14 +380,13 @@ payload, and has been accepted. The result of the request will be send to
 }
 ```
 
-#### 400 Bad Request
+### Bad Request (400)
 
-The JSON is syntactically broken (e.g., a missing comma, unclosed brace, or
-invalid characters).
+The JSON is syntactically broken, or the `providerNSA` does not match the configured value.
 
 ```json
 {
-  "type": "https://github.com/workfloworchestrator/nsi-aggregator-proxy#202-bad-request",
+  "type": "https://github.com/workfloworchestrator/nsi-aggregator-proxy#400-bad-request",
   "title": "Bad Request",
   "status": 400,
   "detail": "The JSON is syntactically broken.",
@@ -277,10 +394,17 @@ invalid characters).
 }
 ```
 
-#### 415 Unsupported Media Type
+### Not Found (404)
 
-Only JSON payload is accepted, set the `Content-Type` header to
-`application/json; charset=utf-8`.
+The `connectionId` does not exist in the store or on the aggregator.
+
+### Conflict (409)
+
+The reservation is not in the required state for the requested operation (e.g. trying to provision a connection that is not `RESERVED`).
+
+### Unsupported Media Type (415)
+
+Only JSON payloads are accepted. Set the `Content-Type` header to `application/json`.
 
 ```json
 {
@@ -292,17 +416,16 @@ Only JSON payload is accepted, set the `Content-Type` header to
 }
 ```
 
-#### 422 Unprocessable Entity
+### Unprocessable Entity (422)
 
-The payload contains invalid data, for example, the sourceSTP is unknown, or
-the capacity is a negative number.
+The payload is valid JSON but contains invalid data (e.g. malformed STP URN, negative capacity).
 
 ```json
 {
   "type": "https://github.com/workfloworchestrator/nsi-aggregator-proxy#422-unprocessable-entity",
   "title": "Unprocessable Entity",
   "status": 422,
-  "detail": "The STP cannot be found in any of the know topologies.",
+  "detail": "The STP cannot be found in any of the known topologies.",
   "instance": "/reservations/5fa943ae",
   "errors": [
     {
@@ -313,10 +436,77 @@ the capacity is a negative number.
 }
 ```
 
-### Error Events
+### Bad Gateway (502)
+
+The proxy could not reach the NSI aggregator, or the aggregator returned an unexpected response.
+
+## Callback Payload
+
+When an operation completes (or fails), the proxy sends a POST request to the `callbackURL` with a JSON body identical to the response from `GET /reservations/{connectionId}`:
+
+```json
+{
+  "globalReservationId": "urn:uuid:5fa943ae-32e8-4faa-9080-0bbdc0f405e8",
+  "connectionId": "9adfed42-fa58-4d26-bf74-9f5e14ab2281",
+  "description": "My first multi domain connection",
+  "criteria": {
+    "version": 1,
+    "serviceType": "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+    "p2ps": {
+      "capacity": 1000,
+      "sourceSTP": "urn:ogf:network:x.domain.toplevel:2020:topology:ps1?vlan=1790",
+      "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
+    }
+  },
+  "status": "RESERVED",
+  "lastError": null
+}
+```
+
+When the status is `FAILED`, the `lastError` field contains a human-readable description of the error, including NSI `ServiceException` details when available.
+
+## Error Events
 
 Error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) from the aggregator are detected via `queryNotificationSync` during state refresh. These can cause the status to become `FAILED` even when the NSI sub-state machines appear normal. The `lastError` field contains a human-readable description of the most recent error event.
 
-### Callback Payload
+## State Mapping from NSI
 
-A payload identical to the one returned by `GET /reservations/{connectionId}`. The `lastError` field is included when the status is `FAILED` due to an error event.
+The proxy maps the NSI sub-state machines (reservation, provision, lifecycle, data plane) to the simplified proxy state using the following priority order:
+
+| Priority | NSI Condition | Proxy State |
+|---|---|---|
+| 1 | Lifecycle = `Terminated` or `PassedEndTime` | `TERMINATED` |
+| 2 | Lifecycle = `Failed` | `FAILED` |
+| 3 | Reservation = `ReserveTimeout`, `ReserveFailed`, or `ReserveAborting` | `FAILED` |
+| 4 | Error events detected (`activateFailed`, `deactivateFailed`, etc.) | `FAILED` |
+| 5 | Reservation = `ReserveChecking`, `ReserveHeld`, or `ReserveCommitting` | `RESERVING` |
+| 6 | Provision = `Released` and data plane active | `DEACTIVATING` |
+| 7 | Data plane active | `ACTIVATED` |
+| 8 | Provision = `Provisioned` (data plane not yet active) | `ACTIVATING` |
+| 9 | Otherwise | `RESERVED` |
+
+## Development
+
+```bash
+# Install dependencies (including dev tools)
+uv sync
+
+# Run tests
+uv run pytest
+
+# Run a single test
+uv run pytest tests/path/to/test_file.py::test_function_name
+
+# Lint
+uv run ruff check .
+
+# Format
+uv run ruff format .
+
+# Type check
+uv run mypy aggregator_proxy
+```
+
+## License
+
+Apache-2.0

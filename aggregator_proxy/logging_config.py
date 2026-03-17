@@ -62,6 +62,10 @@ def configure_logging() -> None:
     root.addHandler(handler)
     root.setLevel(numeric_level)
 
+    # Suppress noisy httpx HTTP-level request logs; the application logs
+    # meaningful messages at each aggregator interaction point instead.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     # Propagate uvicorn logs through the root handler instead of uvicorn's own.
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uvi_logger = logging.getLogger(name)

@@ -82,6 +82,12 @@ async def _send_callback(
         lastError=reservation.last_error,
     )
     payload = detail.model_dump()
+    logger.info(
+        "Delivering callback",
+        connection_id=reservation.connection_id,
+        status=reservation.status,
+        callback_url=callback_url,
+    )
     logger.debug("Outbound JSON callback", callback_url=callback_url, json=payload)
     try:
         await callback_client.post(callback_url, json=payload)
@@ -166,7 +172,7 @@ async def _query_error_events(
         return []
     logger.debug("Inbound SOAP queryNotificationSyncConfirmed response", xml=response.text, connection_id=connection_id)
     try:
-        return parse_query_notification_sync(response.content)
+        events = parse_query_notification_sync(response.content)
     except Exception as exc:
         logger.error(
             "Failed to parse queryNotificationSync response",
@@ -174,6 +180,14 @@ async def _query_error_events(
             error=str(exc),
         )
         return []
+    if events:
+        logger.info(
+            "Error events detected for reservation",
+            connection_id=connection_id,
+            error_event_count=len(events),
+            events=[e.event for e in events],
+        )
+    return events
 
 
 async def _refresh_reservation(
@@ -190,9 +204,12 @@ async def _refresh_reservation(
     logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
     reservations = parse_query_summary_sync(response.content)
     if not reservations:
+        logger.info("Reservation not found on aggregator", connection_id=connection_id)
         return None
     error_events = await _query_error_events(nsi_client, connection_id)
-    return _update_store_from_query(store, reservations[0], error_events)
+    reservation = _update_store_from_query(store, reservations[0], error_events)
+    logger.info("Reservation state refreshed from aggregator", connection_id=connection_id, status=reservation.status)
+    return reservation
 
 
 async def _refresh_all_reservations(
@@ -200,6 +217,7 @@ async def _refresh_all_reservations(
     store: ReservationStore,
 ) -> None:
     """Query the aggregator for all reservations and update the store."""
+    logger.info("Refreshing all reservations from aggregator")
     header = _query_header()
     soap_bytes = build_query_summary_sync(header)
     logger.debug("Outbound SOAP querySummarySync (all) request", xml=soap_bytes.decode())
@@ -207,6 +225,7 @@ async def _refresh_all_reservations(
     response.raise_for_status()
     logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
     reservations = parse_query_summary_sync(response.content)
+    logger.info("Aggregator returned reservations", count=len(reservations))
 
     # For reservations not already in a terminal/failed state, query error events concurrently
     needs_notification: list[QueryReservation] = []
@@ -222,6 +241,7 @@ async def _refresh_all_reservations(
         _update_store_from_query(store, qr)
 
     if needs_notification:
+        logger.info("Checking error events for active reservations", count=len(needs_notification))
         error_results = await asyncio.gather(
             *(_query_error_events(nsi_client, qr.connection_id) for qr in needs_notification)
         )
@@ -270,7 +290,7 @@ async def _complete_reserve(
 
         assert isinstance(msg, ReserveConfirmed)
         store.update_criteria(connection_id, msg)
-        log.info("Reserve confirmed, sending reserveCommit")
+        log.info("Reserve confirmed by aggregator")
 
         # --- Phase 2: send reserveCommit, wait for commit result ---
         commit_correlation_id = f"urn:uuid:{uuid4()}"
@@ -285,6 +305,7 @@ async def _complete_reserve(
         )
         soap_bytes = build_reserve_commit(header, connection_id)
         log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
+        log.info("Sending reserveCommit to aggregator")
         try:
             response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
             response.raise_for_status()
@@ -295,6 +316,7 @@ async def _complete_reserve(
             return
 
         log.debug("Inbound SOAP reserveCommit response", xml=response.text)
+        log.info("ReserveCommit accepted by aggregator, waiting for commit confirmation")
 
         try:
             commit_msg = await asyncio.wait_for(commit_future, timeout=settings.nsi_timeout)
@@ -385,6 +407,7 @@ async def create_reservation(
     )
 
     log.debug("Outbound SOAP reserve request", xml=soap_bytes.decode())
+    log.info("Sending reserve request to aggregator")
 
     try:
         response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
@@ -471,7 +494,7 @@ async def _complete_provision(
             await fail(f"unexpected message: {type(msg).__name__}")
             return
 
-        log.info("Provision confirmed, waiting for dataPlaneStateChange")
+        log.info("Provision confirmed by aggregator, waiting for data plane activation")
 
         # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
         remaining = float(settings.dataplane_timeout)
@@ -500,7 +523,7 @@ async def _complete_provision(
                 log.info("Data plane active, state is ACTIVATED")
                 return
 
-            log.info("DataPlaneStateChange active=False, continuing to wait")
+            log.debug("DataPlaneStateChange active=False, continuing to wait")
 
         await fail("no DataPlaneStateChange(active=True) received within timeout")
 
@@ -555,6 +578,7 @@ async def provision_reservation(
     )
     soap_bytes = build_provision(header, connectionId)
     log.debug("Outbound SOAP provision request", xml=soap_bytes.decode())
+    log.info("Sending provision request to aggregator")
 
     try:
         response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
@@ -565,6 +589,7 @@ async def provision_reservation(
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
 
     log.debug("Inbound SOAP provision response", xml=response.text)
+    log.info("Provision accepted by aggregator, waiting for confirmation")
 
     sync_msg = parse(response.content)
     if not isinstance(sync_msg, Acknowledgment):
@@ -619,7 +644,7 @@ async def _complete_release(
             await fail(f"unexpected message: {type(msg).__name__}")
             return
 
-        log.info("Release confirmed, waiting for dataPlaneStateChange")
+        log.info("Release confirmed by aggregator, waiting for data plane deactivation")
 
         # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
         remaining = float(settings.dataplane_timeout)
@@ -648,7 +673,7 @@ async def _complete_release(
                 log.info("Data plane deactivated, state is RESERVED")
                 return
 
-            log.info("DataPlaneStateChange active=True, continuing to wait")
+            log.debug("DataPlaneStateChange active=True, continuing to wait")
 
         await fail("no DataPlaneStateChange(active=False) received within timeout")
 
@@ -703,6 +728,7 @@ async def release_reservation(
     )
     soap_bytes = build_release(header, connectionId)
     log.debug("Outbound SOAP release request", xml=soap_bytes.decode())
+    log.info("Sending release request to aggregator")
 
     try:
         response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
@@ -713,6 +739,7 @@ async def release_reservation(
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
 
     log.debug("Inbound SOAP release response", xml=response.text)
+    log.info("Release accepted by aggregator, waiting for confirmation")
 
     sync_msg = parse(response.content)
     if not isinstance(sync_msg, Acknowledgment):
@@ -819,6 +846,7 @@ async def terminate_reservation(
     )
     soap_bytes = build_terminate(header, connectionId)
     log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
+    log.info("Sending terminate request to aggregator")
 
     try:
         response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
@@ -829,6 +857,7 @@ async def terminate_reservation(
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
 
     log.debug("Inbound SOAP terminate response", xml=response.text)
+    log.info("Terminate accepted by aggregator, waiting for confirmation")
 
     sync_msg = parse(response.content)
     if not isinstance(sync_msg, Acknowledgment):
@@ -860,7 +889,7 @@ async def get_reservation(
     store: ReservationStore = Depends(get_reservation_store),
 ) -> ReservationDetail:
     """Return the details of the reservation identified by ``connectionId``."""
-    logger.info("Get reservation", connection_id=connectionId)
+    logger.debug("Get reservation request", connection_id=connectionId)
     reservation = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
@@ -884,7 +913,7 @@ async def list_reservations(
     store: ReservationStore = Depends(get_reservation_store),
 ) -> ReservationsListResponse:
     """Return a list of all reservations and their details."""
-    logger.info("List all reservations")
+    logger.debug("List all reservations request")
     await _refresh_all_reservations(nsi_client, store)
     return ReservationsListResponse(
         reservations=[

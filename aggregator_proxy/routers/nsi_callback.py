@@ -6,6 +6,8 @@ the correlationId is extracted, and the matching pending Future in the
 ReservationStore is resolved so the waiting background task can proceed.
 """
 
+from typing import Annotated
+
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
@@ -24,7 +26,7 @@ router = APIRouter(tags=["nsi-callback"])
 @router.post(NSI_CALLBACK_PATH, status_code=200, include_in_schema=False)
 async def nsi_callback(
     request: Request,
-    store: ReservationStore = Depends(get_reservation_store),
+    store: Annotated[ReservationStore, Depends(get_reservation_store)],
 ) -> Response:
     """Receive an async NSI callback from the aggregator and dispatch it."""
     xml_bytes = await request.body()

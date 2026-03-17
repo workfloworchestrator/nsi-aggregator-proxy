@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     dataplane_timeout: int = 300
 
     log_level: str = "INFO"
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # noqa: S104
     port: int = 8080
 
 

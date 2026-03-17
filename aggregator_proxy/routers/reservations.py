@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 from uuid import uuid4
 
 import httpx
@@ -55,6 +56,10 @@ from aggregator_proxy.settings import settings
 from aggregator_proxy.state_mapping import map_nsi_states_to_status
 
 logger = structlog.get_logger(__name__)
+
+NsiClient = Annotated[httpx.AsyncClient, Depends(get_nsi_client)]
+CallbackClient = Annotated[httpx.AsyncClient, Depends(get_callback_client)]
+Store = Annotated[ReservationStore, Depends(get_reservation_store)]
 
 ACCEPTED_TYPE = "https://github.com/workfloworchestrator/nsi-aggregator-proxy#202-accepted"
 _SOAP_HEADERS = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'}
@@ -376,9 +381,9 @@ async def _complete_reserve(
 )
 async def create_reservation(
     body: ReservationRequest,
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    callback_client: httpx.AsyncClient = Depends(get_callback_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    callback_client: CallbackClient,
+    store: Store,
 ) -> JSONResponse:
     """Reserve a connection using the parameters from the input payload.
 
@@ -435,7 +440,7 @@ async def create_reservation(
     except Exception as exc:
         store.cancel_pending(correlation_id)
         logger.error("Failed to send reserve request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator")
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
 
     log.debug("Inbound SOAP reserve response", xml=response.text)
 
@@ -563,9 +568,9 @@ async def _complete_provision(
 async def provision_reservation(
     connectionId: str,
     body: CallbackRequest,
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    callback_client: httpx.AsyncClient = Depends(get_callback_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    callback_client: CallbackClient,
+    store: Store,
 ) -> JSONResponse:
     """Provision the connection identified by ``connectionId``.
 
@@ -714,9 +719,9 @@ async def _complete_release(
 async def release_reservation(
     connectionId: str,
     body: CallbackRequest,
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    callback_client: httpx.AsyncClient = Depends(get_callback_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    callback_client: CallbackClient,
+    store: Store,
 ) -> JSONResponse:
     """Release the connection identified by ``connectionId``.
 
@@ -832,9 +837,9 @@ async def _complete_terminate(
 async def terminate_reservation(
     connectionId: str,
     body: CallbackRequest,
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    callback_client: httpx.AsyncClient = Depends(get_callback_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    callback_client: CallbackClient,
+    store: Store,
 ) -> JSONResponse:
     """Terminate the connection identified by ``connectionId``.
 
@@ -907,8 +912,8 @@ async def terminate_reservation(
 )
 async def get_reservation(
     connectionId: str,
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    store: Store,
 ) -> ReservationDetail:
     """Return the details of the reservation identified by ``connectionId``."""
     logger.debug("Get reservation request", connection_id=connectionId)
@@ -931,8 +936,8 @@ async def get_reservation(
     summary="List all reservations",
 )
 async def list_reservations(
-    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
-    store: ReservationStore = Depends(get_reservation_store),
+    nsi_client: NsiClient,
+    store: Store,
 ) -> ReservationsListResponse:
     """Return a list of all reservations and their details."""
     logger.debug("List all reservations request")

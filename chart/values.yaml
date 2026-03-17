@@ -20,8 +20,8 @@ nameOverride: ""
 fullnameOverride: ""
 
 # Configmap with nsi-aggregator-proxy environment variables mounted into the pod
-env:
-  AGGREGATOR_PROXY_PROVIDER_URL: https://aggregator.example.com/nsi-v2/ConnectionServiceProvider
+#env:
+#  AGGREGATOR_PROXY_PROVIDER_URL: https://aggregator.example.com/nsi-v2/ConnectionServiceProvider
 #  AGGREGATOR_PROXY_REQUESTER_NSA: urn:ogf:network:example.com:2025:requester-nsa
 #  AGGREGATOR_PROXY_PROVIDER_NSA: urn:ogf:network:example.com:2025:provider-nsa
 #  AGGREGATOR_PROXY_BASE_URL: https://proxy.example.com

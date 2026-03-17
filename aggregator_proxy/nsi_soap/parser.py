@@ -63,13 +63,27 @@ class ReserveConfirmed:
 
 
 @dataclass
+class Variable:
+    """A typed variable from a serviceException's variables list."""
+
+    type: str
+    value: str
+
+
+@dataclass
 class ServiceException:
-    """Error detail carried inside a reserveFailed message (GFD.235)."""
+    """Error detail carried inside a reserveFailed message (GFD.235).
+
+    The top-level exception from an aggregator may omit ``connection_id``
+    and carry the real error in one or more ``child_exceptions``.
+    """
 
     nsa_id: str
-    connection_id: str
+    connection_id: str | None
     error_id: str
     text: str
+    variables: list[Variable] | None = None
+    child_exceptions: list["ServiceException"] | None = None
 
 
 @dataclass
@@ -168,6 +182,31 @@ def _require(element: etree._Element, tag: str) -> str:
     return result
 
 
+def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
+    """Parse a serviceException (or childException) element recursively."""
+    children: list[ServiceException] = []
+    for child_el in exc_el.findall("childException"):
+        children.append(_parse_service_exception(child_el))
+
+    variables: list[Variable] = []
+    variables_el = exc_el.find("variables")
+    if variables_el is not None:
+        for var_el in variables_el.findall("variable"):
+            var_type = var_el.get("type", "")
+            var_value = var_el.findtext("value") or ""
+            if var_type or var_value:
+                variables.append(Variable(type=var_type, value=var_value))
+
+    return ServiceException(
+        nsa_id=_require(exc_el, "nsaId"),
+        connection_id=exc_el.findtext("connectionId"),
+        error_id=_require(exc_el, "errorId"),
+        text=_require(exc_el, "text"),
+        variables=variables or None,
+        child_exceptions=children or None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -211,12 +250,7 @@ def parse(xml_bytes: bytes) -> NsiMessage:
                 raise ValueError("<serviceException> not found in reserveFailed")
             return ReserveFailed(
                 connection_id=_require(operation, "connectionId"),
-                service_exception=ServiceException(
-                    nsa_id=_require(exc, "nsaId"),
-                    connection_id=_require(exc, "connectionId"),
-                    error_id=_require(exc, "errorId"),
-                    text=_require(exc, "text"),
-                ),
+                service_exception=_parse_service_exception(exc),
             )
 
         case "reserveTimeout":
@@ -235,12 +269,7 @@ def parse(xml_bytes: bytes) -> NsiMessage:
                 raise ValueError("<serviceException> not found in reserveCommitFailed")
             return ReserveCommitFailed(
                 connection_id=_require(operation, "connectionId"),
-                service_exception=ServiceException(
-                    nsa_id=_require(exc, "nsaId"),
-                    connection_id=_require(exc, "connectionId"),
-                    error_id=_require(exc, "errorId"),
-                    text=_require(exc, "text"),
-                ),
+                service_exception=_parse_service_exception(exc),
             )
 
         case "reserveCommitConfirmed":

@@ -90,7 +90,7 @@ The `nsi_soap` package handles the translation between the REST layer and the NS
 
 ### Current implementation status
 
-`POST /reservations` and `POST /reservations/{connectionId}/provision` are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. The remaining endpoints (`GET`, `DELETE`, release, terminate) are stubbed with `# TODO` comments and return 202 responses without interacting with the aggregator.
+`POST /reservations`, `POST /reservations/{connectionId}/provision`, and `POST /reservations/{connectionId}/release` are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. Release sends the NSI release request, waits for `releaseConfirmed`, then waits for `DataPlaneStateChange(active=False)` to transition back to RESERVED. The remaining endpoints (`GET`, `DELETE`, terminate) are stubbed with `# TODO` comments and return 202 responses without interacting with the aggregator.
 
 ### Configuration reference
 

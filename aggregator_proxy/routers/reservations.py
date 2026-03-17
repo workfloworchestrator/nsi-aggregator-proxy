@@ -26,6 +26,7 @@ from aggregator_proxy.nsi_soap import (
     NsiHeader,
     NsiMessage,
     ProvisionConfirmed,
+    ReleaseConfirmed,
     ReserveCommitConfirmed,
     ReserveCommitFailed,
     ReserveConfirmed,
@@ -33,6 +34,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveResponse,
     ReserveTimeout,
     build_provision,
+    build_release,
     build_reserve,
     build_reserve_commit,
     parse,
@@ -427,6 +429,77 @@ async def provision_reservation(
     )
 
 
+async def _complete_release(
+    connection_id: str,
+    release_future: asyncio.Future[NsiMessage],
+    callback_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> None:
+    """Background task: drive the reservation from DEACTIVATING to RESERVED or FAILED.
+
+    Phase 1 — wait for ReleaseConfirmed (timeout: nsi_timeout).
+    Phase 2 — loop waiting for DataPlaneStateChange(active=False) (timeout: dataplane_timeout).
+    """
+    log = logger.bind(connection_id=connection_id)
+
+    async def fail(reason: str) -> None:
+        store.update_status(connection_id, ReservationStatus.FAILED)
+        reservation = store.get(connection_id)
+        if reservation is not None:
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+        log.info("Release failed", reason=reason)
+
+    try:
+        # --- Phase 1: wait for releaseConfirmed ---
+        try:
+            msg = await asyncio.wait_for(release_future, timeout=settings.nsi_timeout)
+        except asyncio.TimeoutError:
+            await fail("no releaseConfirmed received within timeout")
+            return
+
+        if not isinstance(msg, ReleaseConfirmed):
+            await fail(f"unexpected message: {type(msg).__name__}")
+            return
+
+        log.info("Release confirmed, waiting for dataPlaneStateChange")
+
+        # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
+        remaining = float(settings.dataplane_timeout)
+        while remaining > 0:
+            dp_future = store.register_pending_by_connection(connection_id)
+            start = asyncio.get_event_loop().time()
+            try:
+                dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
+            except asyncio.TimeoutError:
+                store.cancel_pending_by_connection(connection_id)
+                await fail("no DataPlaneStateChange(active=False) received within timeout")
+                return
+
+            elapsed = asyncio.get_event_loop().time() - start
+            remaining -= elapsed
+
+            if not isinstance(dp_msg, DataPlaneStateChange):
+                log.warning("Unexpected message while waiting for dataPlaneStateChange", msg_type=type(dp_msg).__name__)
+                continue
+
+            if not dp_msg.active:
+                store.update_status(connection_id, ReservationStatus.RESERVED)
+                reservation = store.get(connection_id)
+                if reservation is not None:
+                    await _send_callback(callback_client, reservation.callback_url, reservation)
+                log.info("Data plane deactivated, state is RESERVED")
+                return
+
+            log.info("DataPlaneStateChange active=True, continuing to wait")
+
+        await fail("no DataPlaneStateChange(active=False) received within timeout")
+
+    except Exception:
+        log.exception("Unexpected error in _complete_release")
+        with contextlib.suppress(Exception):
+            await fail("internal error")
+
+
 @router.post(
     "/{connectionId}/release",
     status_code=status.HTTP_202_ACCEPTED,
@@ -437,6 +510,8 @@ async def release_reservation(
     connectionId: str,
     body: CallbackRequest,
     nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
+    callback_client: httpx.AsyncClient = Depends(get_callback_client),
+    store: ReservationStore = Depends(get_reservation_store),
 ) -> JSONResponse:
     """Release the connection identified by ``connectionId``.
 
@@ -444,10 +519,57 @@ async def release_reservation(
     On acceptance it transitions to ``DEACTIVATING``.  The final result
     (``RESERVED`` or ``FAILED``) is delivered to ``callbackURL``.
     """
-    logger.info("Release request received", connection_id=connectionId, callback_url=str(body.callbackURL))
-    logger.debug("JSON request body", json=body.model_dump(mode="json"))
+    log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
+    log.info("Release request received")
+    log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    # TODO: validate state, send NSI release request to aggregator
+    reservation = store.get(connectionId)
+    if reservation is None:
+        raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
+    if reservation.status != ReservationStatus.ACTIVATED:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reservation is in {reservation.status} state, must be ACTIVATED to release",
+        )
+
+    reservation.callback_url = str(body.callbackURL)
+
+    correlation_id = f"urn:uuid:{uuid4()}"
+    release_future = store.register_pending(correlation_id)
+
+    header = NsiHeader(
+        requester_nsa=reservation.requester_nsa,
+        provider_nsa=reservation.provider_nsa,
+        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
+        correlation_id=correlation_id,
+    )
+    soap_bytes = build_release(header, connectionId)
+    log.debug("Outbound SOAP release request", xml=soap_bytes.decode())
+
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response.raise_for_status()
+    except Exception as exc:
+        store.cancel_pending(correlation_id)
+        log.error("Failed to send release request to aggregator", error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+
+    log.debug("Inbound SOAP release response", xml=response.text)
+
+    sync_msg = parse(response.content)
+    if not isinstance(sync_msg, Acknowledgment):
+        store.cancel_pending(correlation_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+        )
+
+    store.update_status(connectionId, ReservationStatus.DEACTIVATING)
+
+    asyncio.create_task(
+        _complete_release(connectionId, release_future, callback_client, store),
+        name=f"release-{connectionId}",
+    )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,

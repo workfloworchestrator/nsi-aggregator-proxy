@@ -14,5 +14,5 @@ RUN uv pip install --system --no-cache /tmp/*.whl && rm /tmp/*.whl
 RUN addgroup -g 1000 aggregator_proxy && adduser -D -u 1000 -G aggregator_proxy aggregator_proxy
 USER aggregator_proxy
 WORKDIR /home/aggregator_proxy
-EXPOSE 8000/tcp
+EXPOSE 8080/tcp
 CMD ["aggregator-proxy"]

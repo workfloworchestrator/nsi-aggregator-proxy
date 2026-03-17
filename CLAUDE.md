@@ -10,8 +10,10 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency and environmen
 # Install dependencies
 uv sync
 
-# Run the application (requires AGGREGATOR_PROXY_PROVIDER_URL and AGGREGATOR_PROXY_BASE_URL)
+# Run the application (requires all four AGGREGATOR_PROXY_* variables below)
 AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
   AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
   uv run aggregator-proxy
 
@@ -44,27 +46,30 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 - **mTLS support**: the `httpx.AsyncClient` (created in `nsi_client.py`) can be configured with a client certificate/key pair and a custom CA bundle for mutual TLS against the aggregator.
 - **Shared client via app state**: the `httpx.AsyncClient` is created at startup in the `lifespan` context manager (`main.py`) and stored in `app.state.nsi_client`. Routers access it through the `get_nsi_client` FastAPI dependency (`dependencies.py`).
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
-- **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL` and `AGGREGATOR_PROXY_BASE_URL`.
+- **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL`, `AGGREGATOR_PROXY_REQUESTER_NSA`, `AGGREGATOR_PROXY_PROVIDER_NSA`, and `AGGREGATOR_PROXY_BASE_URL`.
 
 ### Module layout
 
 ```
 aggregator_proxy/
-  main.py            # FastAPI app, lifespan, entry point (run())
-  settings.py        # pydantic-settings config (env prefix: AGGREGATOR_PROXY_)
-  models.py          # Pydantic request/response models and ReservationStatus enum
-  nsi_client.py      # httpx.AsyncClient factory with mTLS config
-  dependencies.py    # FastAPI dependency: get_nsi_client
-  logging_config.py  # structlog + stdlib unified logging pipeline
+  main.py               # FastAPI app, lifespan, entry point (run()), /health endpoint
+  settings.py           # pydantic-settings config (env prefix: AGGREGATOR_PROXY_)
+  models.py             # Pydantic request/response models and ReservationStatus enum
+  reservation_store.py  # In-memory reservation store and pending NSI correlation tracking
+  state_mapping.py      # Maps NSI sub-state machines to proxy ReservationStatus
+  nsi_client.py         # httpx.AsyncClient factory with mTLS config
+  dependencies.py       # FastAPI dependency: get_nsi_client
+  logging_config.py     # structlog + stdlib unified logging pipeline
   routers/
-    reservations.py  # All /reservations endpoints (POST, GET, DELETE)
-    nsi_callback.py  # POST /nsi/v2/callback — receives async NSI callbacks
+    reservations.py     # All /reservations endpoints (POST, GET, DELETE, provision, release)
+    nsi_callback.py     # POST /nsi/v2/callback — receives async NSI callbacks
   nsi_soap/
-    namespaces.py    # Shared NSMAP dict for all NSI CS v2 XML namespaces
-    builder.py       # NsiHeader dataclass + build_reserve / build_reserve_commit /
-                     #   build_provision / build_release / build_terminate (lxml)
-    parser.py        # parse() dispatcher → typed dataclasses for every inbound
-                     #   message type; see module docstring for sync vs async classification
+    namespaces.py       # Shared NSMAP dict for all NSI CS v2 XML namespaces
+    builder.py          # NsiHeader dataclass + build_reserve / build_reserve_commit /
+                        #   build_provision / build_release / build_terminate /
+                        #   build_query_summary_sync / build_query_notification_sync (lxml)
+    parser.py           # parse() dispatcher → typed dataclasses for every inbound
+                        #   message type; see module docstring for sync vs async classification
 ```
 
 ### NSI SOAP layer
@@ -83,6 +88,7 @@ The `nsi_soap` package handles the translation between the REST layer and the NS
 | `ReserveFailed` | Async callback | State → FAILED; carries `ServiceException` (errorId + text per GFD.235) |
 | `ReserveTimeout` | Async callback | State → FAILED; reserve timed out before commit |
 | `ReserveCommitConfirmed` | Async callback | State → RESERVED |
+| `ReserveCommitFailed` | Async callback | State → FAILED; carries `ServiceException` |
 | `ProvisionConfirmed` | Async callback | Awaiting `dataPlaneStateChange` |
 | `DataPlaneStateChange` | Async callback | `active=True` → ACTIVATED, `active=False` → RESERVED |
 | `ReleaseConfirmed` | Async callback | State → RESERVED |

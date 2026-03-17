@@ -36,6 +36,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveFailed,
     ReserveResponse,
     ReserveTimeout,
+    ServiceException,
     TerminateConfirmed,
     build_provision,
     build_query_notification_sync,
@@ -104,6 +105,25 @@ def _query_header() -> NsiHeader:
     )
 
 
+def _format_service_exception(exc: ServiceException) -> str:
+    """Format a ServiceException into a human-readable string.
+
+    When the exception has child exceptions (e.g. from downstream NSAs),
+    the child details are appended as they typically contain the actual error.
+    """
+    parts = [f"[{exc.error_id}] {exc.text} (nsaId={exc.nsa_id})"]
+    if exc.variables:
+        for var in exc.variables:
+            parts.append(f"  {var.type}={var.value}")
+    if exc.child_exceptions:
+        for child in exc.child_exceptions:
+            parts.append(f"  child [{child.error_id}] {child.text} (nsaId={child.nsa_id})")
+            if child.variables:
+                for var in child.variables:
+                    parts.append(f"    {var.type}={var.value}")
+    return "\n".join(parts)
+
+
 def _format_last_error(error_events: list[ErrorEvent]) -> str | None:
     """Return a human-readable error string from the most recent error event."""
     if not error_events:
@@ -134,7 +154,8 @@ def _update_store_from_query(
 
     if existing is not None:
         existing.status = mapped_status
-        existing.last_error = last_error
+        if last_error is not None:
+            existing.last_error = last_error
         if criteria is not None:
             existing.criteria = criteria
         return existing
@@ -269,6 +290,7 @@ async def _complete_reserve(
         store.update_status(connection_id, ReservationStatus.FAILED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = reason
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Reservation failed", reason=reason)
 
@@ -281,7 +303,7 @@ async def _complete_reserve(
             return
 
         if isinstance(msg, ReserveFailed):
-            await fail(f"reserveFailed [{msg.service_exception.error_id}]: {msg.service_exception.text}")
+            await fail(f"reserveFailed: {_format_service_exception(msg.service_exception)}")
             return
 
         if isinstance(msg, ReserveTimeout):
@@ -325,9 +347,7 @@ async def _complete_reserve(
             return
 
         if isinstance(commit_msg, ReserveCommitFailed):
-            await fail(
-                f"reserveCommitFailed [{commit_msg.service_exception.error_id}]: {commit_msg.service_exception.text}"
-            )
+            await fail(f"reserveCommitFailed: {_format_service_exception(commit_msg.service_exception)}")
             return
 
         assert isinstance(commit_msg, ReserveCommitConfirmed)
@@ -479,6 +499,7 @@ async def _complete_provision(
         store.update_status(connection_id, ReservationStatus.FAILED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = reason
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Provision failed", reason=reason)
 
@@ -629,6 +650,7 @@ async def _complete_release(
         store.update_status(connection_id, ReservationStatus.FAILED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = reason
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Release failed", reason=reason)
 

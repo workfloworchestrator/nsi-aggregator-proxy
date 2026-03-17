@@ -33,10 +33,12 @@ from aggregator_proxy.nsi_soap import (
     ReserveFailed,
     ReserveResponse,
     ReserveTimeout,
+    TerminateConfirmed,
     build_provision,
     build_release,
     build_reserve,
     build_reserve_commit,
+    build_terminate,
     parse,
 )
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
@@ -577,6 +579,45 @@ async def release_reservation(
     )
 
 
+async def _complete_terminate(
+    connection_id: str,
+    terminate_future: asyncio.Future[NsiMessage],
+    callback_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> None:
+    """Background task: drive the reservation to TERMINATED.
+
+    Wait for TerminateConfirmed (timeout: nsi_timeout).
+    Both success and failure end in TERMINATED per the state machine.
+    """
+    log = logger.bind(connection_id=connection_id)
+
+    async def terminated(reason: str) -> None:
+        store.update_status(connection_id, ReservationStatus.TERMINATED)
+        reservation = store.get(connection_id)
+        if reservation is not None:
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+        log.info("Terminate completed", reason=reason)
+
+    try:
+        try:
+            msg = await asyncio.wait_for(terminate_future, timeout=settings.nsi_timeout)
+        except asyncio.TimeoutError:
+            await terminated("no terminateConfirmed received within timeout")
+            return
+
+        if not isinstance(msg, TerminateConfirmed):
+            await terminated(f"unexpected message: {type(msg).__name__}")
+            return
+
+        await terminated("terminateConfirmed received")
+
+    except Exception:
+        log.exception("Unexpected error in _complete_terminate")
+        with contextlib.suppress(Exception):
+            await terminated("internal error")
+
+
 @router.delete(
     "/{connectionId}",
     status_code=status.HTTP_202_ACCEPTED,
@@ -587,6 +628,8 @@ async def terminate_reservation(
     connectionId: str,
     body: CallbackRequest,
     nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
+    callback_client: httpx.AsyncClient = Depends(get_callback_client),
+    store: ReservationStore = Depends(get_reservation_store),
 ) -> JSONResponse:
     """Terminate the connection identified by ``connectionId``.
 
@@ -594,10 +637,55 @@ async def terminate_reservation(
     state.  On acceptance it transitions to ``TERMINATED``.  The final result
     is delivered to ``callbackURL``.
     """
-    logger.info("Terminate request received", connection_id=connectionId, callback_url=str(body.callbackURL))
-    logger.debug("JSON request body", json=body.model_dump(mode="json"))
+    log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
+    log.info("Terminate request received")
+    log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    # TODO: validate state, send NSI terminate request to aggregator
+    reservation = store.get(connectionId)
+    if reservation is None:
+        raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
+    if reservation.status not in (ReservationStatus.RESERVED, ReservationStatus.FAILED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reservation is in {reservation.status} state, must be RESERVED or FAILED to terminate",
+        )
+
+    reservation.callback_url = str(body.callbackURL)
+
+    correlation_id = f"urn:uuid:{uuid4()}"
+    terminate_future = store.register_pending(correlation_id)
+
+    header = NsiHeader(
+        requester_nsa=reservation.requester_nsa,
+        provider_nsa=reservation.provider_nsa,
+        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
+        correlation_id=correlation_id,
+    )
+    soap_bytes = build_terminate(header, connectionId)
+    log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
+
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response.raise_for_status()
+    except Exception as exc:
+        store.cancel_pending(correlation_id)
+        log.error("Failed to send terminate request to aggregator", error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+
+    log.debug("Inbound SOAP terminate response", xml=response.text)
+
+    sync_msg = parse(response.content)
+    if not isinstance(sync_msg, Acknowledgment):
+        store.cancel_pending(correlation_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+        )
+
+    asyncio.create_task(
+        _complete_terminate(connectionId, terminate_future, callback_client, store),
+        name=f"terminate-{connectionId}",
+    )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,

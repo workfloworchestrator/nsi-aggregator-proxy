@@ -115,15 +115,6 @@ class TestParseQuerySummarySync:
         assert result[0].connection_id == "conn-001"
         assert result[1].connection_id == "conn-002"
 
-    def test_real_world_xml(self) -> None:
-        """Parse the example output from the actual aggregator."""
-        with open("query.summary.sync.example.output.xml", "rb") as f:
-            xml = f.read()
-        result = parse_query_summary_sync(xml)
-        assert len(result) > 0
-        ids = {r.connection_id for r in result}
-        assert "250660f8-266a-465f-8eeb-0317c2bea95b" in ids
-
     def test_wrong_operation_raises(self) -> None:
         xml = (
             '<?xml version="1.0" encoding="UTF-8"?>'

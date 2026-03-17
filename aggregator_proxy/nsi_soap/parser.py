@@ -164,10 +164,7 @@ def _require(element: etree._Element, tag: str) -> str:
     """Return the text of a direct child element, raising ValueError if absent."""
     result = element.findtext(tag)
     if result is None:
-        raise ValueError(
-            f"Required element <{tag}> not found inside "
-            f"<{etree.QName(element.tag).localname}>"
-        )
+        raise ValueError(f"Required element <{tag}> not found inside <{etree.QName(element.tag).localname}>")
     return result
 
 
@@ -200,12 +197,12 @@ def parse(xml_bytes: bytes) -> NsiMessage:
             if p2ps is None:
                 raise ValueError("<p2ps> not found in criteria")
             return ReserveConfirmed(
-                connection_id   =_require(operation, "connectionId"),
+                connection_id=_require(operation, "connectionId"),
                 criteria_version=int(criteria.get("version", "1")),
-                service_type    =_require(criteria, "serviceType"),
-                capacity        =int(_require(p2ps, "capacity")),
-                source_stp      =_require(p2ps, "sourceSTP"),
-                dest_stp        =_require(p2ps, "destSTP"),
+                service_type=_require(criteria, "serviceType"),
+                capacity=int(_require(p2ps, "capacity")),
+                source_stp=_require(p2ps, "sourceSTP"),
+                dest_stp=_require(p2ps, "destSTP"),
             )
 
         case "reserveFailed":
@@ -213,23 +210,23 @@ def parse(xml_bytes: bytes) -> NsiMessage:
             if exc is None:
                 raise ValueError("<serviceException> not found in reserveFailed")
             return ReserveFailed(
-                connection_id    =_require(operation, "connectionId"),
+                connection_id=_require(operation, "connectionId"),
                 service_exception=ServiceException(
-                    nsa_id       =_require(exc, "nsaId"),
+                    nsa_id=_require(exc, "nsaId"),
                     connection_id=_require(exc, "connectionId"),
-                    error_id     =_require(exc, "errorId"),
-                    text         =_require(exc, "text"),
+                    error_id=_require(exc, "errorId"),
+                    text=_require(exc, "text"),
                 ),
             )
 
         case "reserveTimeout":
             return ReserveTimeout(
-                connection_id           =_require(operation, "connectionId"),
-                notification_id         =int(_require(operation, "notificationId")),
-                timestamp               =_require(operation, "timeStamp"),
-                timeout_value           =int(_require(operation, "timeoutValue")),
+                connection_id=_require(operation, "connectionId"),
+                notification_id=int(_require(operation, "notificationId")),
+                timestamp=_require(operation, "timeStamp"),
+                timeout_value=int(_require(operation, "timeoutValue")),
                 originating_connection_id=_require(operation, "originatingConnectionId"),
-                originating_nsa         =_require(operation, "originatingNSA"),
+                originating_nsa=_require(operation, "originatingNSA"),
             )
 
         case "reserveCommitFailed":
@@ -237,12 +234,12 @@ def parse(xml_bytes: bytes) -> NsiMessage:
             if exc is None:
                 raise ValueError("<serviceException> not found in reserveCommitFailed")
             return ReserveCommitFailed(
-                connection_id    =_require(operation, "connectionId"),
+                connection_id=_require(operation, "connectionId"),
                 service_exception=ServiceException(
-                    nsa_id       =_require(exc, "nsaId"),
+                    nsa_id=_require(exc, "nsaId"),
                     connection_id=_require(exc, "connectionId"),
-                    error_id     =_require(exc, "errorId"),
-                    text         =_require(exc, "text"),
+                    error_id=_require(exc, "errorId"),
+                    text=_require(exc, "text"),
                 ),
             )
 
@@ -261,11 +258,11 @@ def parse(xml_bytes: bytes) -> NsiMessage:
             if dps is None:
                 raise ValueError("<dataPlaneStatus> not found in dataPlaneStateChange")
             return DataPlaneStateChange(
-                connection_id     =_require(operation, "connectionId"),
-                notification_id   =int(_require(operation, "notificationId")),
-                timestamp         =_require(operation, "timeStamp"),
-                active            =_require(dps, "active") == "true",
-                version           =int(_require(dps, "version")),
+                connection_id=_require(operation, "connectionId"),
+                notification_id=int(_require(operation, "notificationId")),
+                timestamp=_require(operation, "timeStamp"),
+                active=_require(dps, "active") == "true",
+                version=int(_require(dps, "version")),
                 version_consistent=_require(dps, "versionConsistent") == "true",
             )
 
@@ -284,6 +281,172 @@ def parse(xml_bytes: bytes) -> NsiMessage:
 
         case _:
             raise ValueError(f"Unknown NSI operation: {local!r}")
+
+
+# ---------------------------------------------------------------------------
+# Query summary sync
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConnectionStates:
+    """NSI connection sub-state machines."""
+
+    reservation_state: str
+    provision_state: str
+    lifecycle_state: str
+    data_plane_active: bool
+
+
+@dataclass
+class QueryReservation:
+    """A single reservation as returned in querySummarySyncConfirmed."""
+
+    connection_id: str
+    global_reservation_id: str | None
+    description: str
+    requester_nsa: str
+    connection_states: ConnectionStates
+    criteria_version: int | None = None
+    service_type: str | None = None
+    capacity: int | None = None
+    source_stp: str | None = None
+    dest_stp: str | None = None
+
+
+def parse_query_summary_sync(xml_bytes: bytes) -> list[QueryReservation]:
+    """Parse a querySummarySyncConfirmed SOAP envelope into a list of reservations."""
+    root = etree.fromstring(xml_bytes)
+    body = root.find(f"{{{NSMAP['soapenv']}}}Body")
+    if body is None or not len(body):
+        raise ValueError("No SOAP Body found or Body is empty")
+
+    confirmed = body[0]
+    local = etree.QName(confirmed.tag).localname
+    if local != "querySummarySyncConfirmed":
+        raise ValueError(f"Expected querySummarySyncConfirmed, got {local!r}")
+
+    results: list[QueryReservation] = []
+    for reservation_el in confirmed.findall("reservation"):
+        connection_id = _require(reservation_el, "connectionId")
+        global_reservation_id = reservation_el.findtext("globalReservationId")
+        description = reservation_el.findtext("description") or ""
+        requester_nsa = reservation_el.findtext("requesterNSA") or ""
+
+        # Connection states
+        states_el = reservation_el.find("connectionStates")
+        if states_el is None:
+            raise ValueError(f"<connectionStates> not found for reservation {connection_id}")
+        dps_el = states_el.find("dataPlaneStatus")
+        if dps_el is None:
+            raise ValueError(f"<dataPlaneStatus> not found for reservation {connection_id}")
+
+        connection_states = ConnectionStates(
+            reservation_state=_require(states_el, "reservationState"),
+            provision_state=_require(states_el, "provisionState"),
+            lifecycle_state=_require(states_el, "lifecycleState"),
+            data_plane_active=_require(dps_el, "active") == "true",
+        )
+
+        # Optional criteria
+        criteria_version: int | None = None
+        service_type: str | None = None
+        capacity: int | None = None
+        source_stp: str | None = None
+        dest_stp: str | None = None
+
+        criteria_el = reservation_el.find("criteria")
+        if criteria_el is not None:
+            criteria_version = int(criteria_el.get("version", "1"))
+            service_type = criteria_el.findtext("serviceType")
+            p2ps_el = criteria_el.find(f"{{{_P}}}p2ps")
+            if p2ps_el is not None:
+                cap_text = p2ps_el.findtext("capacity")
+                if cap_text is not None:
+                    capacity = int(cap_text)
+                source_stp = p2ps_el.findtext("sourceSTP")
+                dest_stp = p2ps_el.findtext("destSTP")
+
+        results.append(
+            QueryReservation(
+                connection_id=connection_id,
+                global_reservation_id=global_reservation_id,
+                description=description,
+                requester_nsa=requester_nsa,
+                connection_states=connection_states,
+                criteria_version=criteria_version,
+                service_type=service_type,
+                capacity=capacity,
+                source_stp=source_stp,
+                dest_stp=dest_stp,
+            )
+        )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Query notification sync
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ErrorEvent:
+    """An errorEvent notification from queryNotificationSync."""
+
+    connection_id: str
+    notification_id: int
+    timestamp: str
+    event: str  # activateFailed | deactivateFailed | dataplaneError | forcedEnd
+    originating_connection_id: str
+    originating_nsa: str
+    service_exception: ServiceException | None
+
+
+def parse_query_notification_sync(xml_bytes: bytes) -> list[ErrorEvent]:
+    """Parse a queryNotificationSyncConfirmed SOAP envelope into a list of error events."""
+    root = etree.fromstring(xml_bytes)
+    body = root.find(f"{{{NSMAP['soapenv']}}}Body")
+    if body is None or not len(body):
+        raise ValueError("No SOAP Body found or Body is empty")
+
+    confirmed = body[0]
+    local = etree.QName(confirmed.tag).localname
+    if local != "queryNotificationSyncConfirmed":
+        raise ValueError(f"Expected queryNotificationSyncConfirmed, got {local!r}")
+
+    results: list[ErrorEvent] = []
+    for error_el in confirmed.findall(f"{{{_C}}}errorEvent"):
+        connection_id = _require(error_el, "connectionId")
+        notification_id = int(_require(error_el, "notificationId"))
+        timestamp = _require(error_el, "timeStamp")
+        event = _require(error_el, "event")
+        originating_connection_id = _require(error_el, "originatingConnectionId")
+        originating_nsa = _require(error_el, "originatingNSA")
+
+        service_exception: ServiceException | None = None
+        exc_el = error_el.find("serviceException")
+        if exc_el is not None:
+            service_exception = ServiceException(
+                nsa_id=_require(exc_el, "nsaId"),
+                connection_id=_require(exc_el, "connectionId"),
+                error_id=_require(exc_el, "errorId"),
+                text=_require(exc_el, "text"),
+            )
+
+        results.append(
+            ErrorEvent(
+                connection_id=connection_id,
+                notification_id=notification_id,
+                timestamp=timestamp,
+                event=event,
+                originating_connection_id=originating_connection_id,
+                originating_nsa=originating_nsa,
+                service_exception=service_exception,
+            )
+        )
+
+    return results
 
 
 def parse_correlation_id(xml_bytes: bytes) -> str:

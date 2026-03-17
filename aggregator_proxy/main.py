@@ -16,6 +16,7 @@ from aggregator_proxy.nsi_client import create_nsi_client
 from aggregator_proxy.reservation_store import ReservationStore
 from aggregator_proxy.routers import reservations
 from aggregator_proxy.routers.nsi_callback import router as nsi_callback_router
+from aggregator_proxy.routers.reservations import _refresh_all_reservations
 from aggregator_proxy.settings import settings
 
 logger = structlog.get_logger(__name__)
@@ -38,6 +39,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.nsi_client = create_nsi_client()
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = ReservationStore()
+    try:
+        await _refresh_all_reservations(app.state.nsi_client, app.state.reservation_store)
+        logger.info("Startup query completed, reservation store populated")
+    except Exception:
+        logger.exception("Failed to query aggregator on startup, starting with empty store")
     yield
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()
@@ -46,10 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="NSI Aggregator Proxy",
-    description=(
-        "REST proxy exposing a simplified connection state-machine "
-        "on top of an NSI aggregator."
-    ),
+    description=("REST proxy exposing a simplified connection state-machine on top of an NSI aggregator."),
     version=APP_VERSION,
     lifespan=lifespan,
 )

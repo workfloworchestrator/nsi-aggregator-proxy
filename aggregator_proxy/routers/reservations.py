@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from aggregator_proxy.dependencies import get_callback_client, get_nsi_client, get_reservation_store
 from aggregator_proxy.models import (
+    P2PS,
     AcceptedResponse,
     CallbackRequest,
     CriteriaResponse,
@@ -23,9 +24,11 @@ from aggregator_proxy.models import (
 from aggregator_proxy.nsi_soap import (
     Acknowledgment,
     DataPlaneStateChange,
+    ErrorEvent,
     NsiHeader,
     NsiMessage,
     ProvisionConfirmed,
+    QueryReservation,
     ReleaseConfirmed,
     ReserveCommitConfirmed,
     ReserveCommitFailed,
@@ -35,15 +38,20 @@ from aggregator_proxy.nsi_soap import (
     ReserveTimeout,
     TerminateConfirmed,
     build_provision,
+    build_query_notification_sync,
+    build_query_summary_sync,
     build_release,
     build_reserve,
     build_reserve_commit,
     build_terminate,
     parse,
+    parse_query_notification_sync,
+    parse_query_summary_sync,
 )
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from aggregator_proxy.routers.nsi_callback import NSI_CALLBACK_PATH
 from aggregator_proxy.settings import settings
+from aggregator_proxy.state_mapping import map_nsi_states_to_status
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +79,7 @@ async def _send_callback(
         description=reservation.description,
         criteria=reservation.criteria,
         status=reservation.status,
+        lastError=reservation.last_error,
     )
     payload = detail.model_dump()
     logger.debug("Outbound JSON callback", callback_url=callback_url, json=payload)
@@ -78,6 +87,146 @@ async def _send_callback(
         await callback_client.post(callback_url, json=payload)
     except Exception as exc:
         logger.error("Failed to deliver callback", callback_url=callback_url, error=str(exc))
+
+
+def _query_header() -> NsiHeader:
+    """Build an NsiHeader for querySummarySync requests."""
+    return NsiHeader(
+        requester_nsa=settings.requester_nsa,
+        provider_nsa=settings.provider_nsa,
+        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
+    )
+
+
+def _format_last_error(error_events: list[ErrorEvent]) -> str | None:
+    """Return a human-readable error string from the most recent error event."""
+    if not error_events:
+        return None
+    latest = max(error_events, key=lambda e: e.notification_id)
+    if latest.service_exception is not None:
+        return f"{latest.event}: {latest.service_exception.error_id}: {latest.service_exception.text}"
+    return latest.event
+
+
+def _update_store_from_query(
+    store: ReservationStore, qr: QueryReservation, error_events: list[ErrorEvent] | None = None
+) -> Reservation:
+    """Create or update a Reservation in the store from a QueryReservation."""
+    has_errors = bool(error_events)
+    mapped_status = map_nsi_states_to_status(qr.connection_states, has_error_event=has_errors)
+    existing = store.get(qr.connection_id)
+
+    criteria: CriteriaResponse | None = None
+    if qr.capacity is not None and qr.source_stp is not None and qr.dest_stp is not None:
+        criteria = CriteriaResponse(
+            version=qr.criteria_version or 1,
+            serviceType=qr.service_type,
+            p2ps=P2PS(capacity=qr.capacity, sourceSTP=qr.source_stp, destSTP=qr.dest_stp),
+        )
+
+    last_error = _format_last_error(error_events or [])
+
+    if existing is not None:
+        existing.status = mapped_status
+        existing.last_error = last_error
+        if criteria is not None:
+            existing.criteria = criteria
+        return existing
+
+    reservation = Reservation(
+        connection_id=qr.connection_id,
+        status=mapped_status,
+        global_reservation_id=qr.global_reservation_id,
+        description=qr.description,
+        criteria=criteria,
+        requester_nsa=qr.requester_nsa,
+        last_error=last_error,
+    )
+    store.create(reservation)
+    return reservation
+
+
+async def _query_error_events(
+    nsi_client: httpx.AsyncClient,
+    connection_id: str,
+) -> list[ErrorEvent]:
+    """Query the aggregator for error event notifications for a connection."""
+    header = _query_header()
+    soap_bytes = build_query_notification_sync(header, connection_id)
+    logger.debug("Outbound SOAP queryNotificationSync request", xml=soap_bytes.decode(), connection_id=connection_id)
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.error(
+            "Failed to query notifications from aggregator",
+            connection_id=connection_id,
+            error=str(exc),
+        )
+        return []
+    logger.debug("Inbound SOAP queryNotificationSyncConfirmed response", xml=response.text, connection_id=connection_id)
+    try:
+        return parse_query_notification_sync(response.content)
+    except Exception as exc:
+        logger.error(
+            "Failed to parse queryNotificationSync response",
+            connection_id=connection_id,
+            error=str(exc),
+        )
+        return []
+
+
+async def _refresh_reservation(
+    connection_id: str,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> Reservation | None:
+    """Query the aggregator for a single reservation and update the store."""
+    header = _query_header()
+    soap_bytes = build_query_summary_sync(header, connection_id=connection_id)
+    logger.debug("Outbound SOAP querySummarySync request", xml=soap_bytes.decode(), connection_id=connection_id)
+    response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+    response.raise_for_status()
+    logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
+    reservations = parse_query_summary_sync(response.content)
+    if not reservations:
+        return None
+    error_events = await _query_error_events(nsi_client, connection_id)
+    return _update_store_from_query(store, reservations[0], error_events)
+
+
+async def _refresh_all_reservations(
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> None:
+    """Query the aggregator for all reservations and update the store."""
+    header = _query_header()
+    soap_bytes = build_query_summary_sync(header)
+    logger.debug("Outbound SOAP querySummarySync (all) request", xml=soap_bytes.decode())
+    response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+    response.raise_for_status()
+    logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
+    reservations = parse_query_summary_sync(response.content)
+
+    # For reservations not already in a terminal/failed state, query error events concurrently
+    needs_notification: list[QueryReservation] = []
+    terminal_reservations: list[QueryReservation] = []
+    for qr in reservations:
+        preliminary_status = map_nsi_states_to_status(qr.connection_states)
+        if preliminary_status in (ReservationStatus.TERMINATED, ReservationStatus.FAILED):
+            terminal_reservations.append(qr)
+        else:
+            needs_notification.append(qr)
+
+    for qr in terminal_reservations:
+        _update_store_from_query(store, qr)
+
+    if needs_notification:
+        error_results = await asyncio.gather(
+            *(_query_error_events(nsi_client, qr.connection_id) for qr in needs_notification)
+        )
+        for qr, error_events in zip(needs_notification, error_results, strict=True):
+            _update_store_from_query(store, qr, error_events)
 
 
 async def _complete_reserve(
@@ -128,10 +277,9 @@ async def _complete_reserve(
         commit_future = store.register_pending(commit_correlation_id)
         reservation = store.get(connection_id)
         requester_nsa = reservation.requester_nsa if reservation is not None else ""
-        provider_nsa = reservation.provider_nsa if reservation is not None else ""
         header = NsiHeader(
             requester_nsa=requester_nsa,
-            provider_nsa=provider_nsa,
+            provider_nsa=settings.provider_nsa,
             reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
             correlation_id=commit_correlation_id,
         )
@@ -204,6 +352,14 @@ async def create_reservation(
     log.info("Reserve request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
+    if body.providerNSA != settings.provider_nsa:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"providerNSA {body.providerNSA!r} does not match the configured provider {settings.provider_nsa!r}"
+            ),
+        )
+
     correlation_id = f"urn:uuid:{uuid4()}"
     # Register the future BEFORE sending the SOAP request so the callback
     # can never arrive before we are ready to receive it.
@@ -212,7 +368,7 @@ async def create_reservation(
     now = datetime.now(timezone.utc)
     header = NsiHeader(
         requester_nsa=body.requesterNSA,
-        provider_nsa=body.providerNSA,
+        provider_nsa=settings.provider_nsa,
         reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
         correlation_id=correlation_id,
     )
@@ -264,7 +420,7 @@ async def create_reservation(
                 p2ps=body.criteria.p2ps,
             ),
             requester_nsa=body.requesterNSA,
-            provider_nsa=body.providerNSA,
+            provider_nsa=settings.provider_nsa,
             callback_url=str(body.callbackURL),
         )
     )
@@ -377,7 +533,7 @@ async def provision_reservation(
     log.info("Provision request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = store.get(connectionId)
+    reservation = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status != ReservationStatus.RESERVED:
@@ -393,7 +549,7 @@ async def provision_reservation(
 
     header = NsiHeader(
         requester_nsa=reservation.requester_nsa,
-        provider_nsa=reservation.provider_nsa,
+        provider_nsa=settings.provider_nsa,
         reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
         correlation_id=correlation_id,
     )
@@ -525,7 +681,7 @@ async def release_reservation(
     log.info("Release request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = store.get(connectionId)
+    reservation = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status != ReservationStatus.ACTIVATED:
@@ -541,7 +697,7 @@ async def release_reservation(
 
     header = NsiHeader(
         requester_nsa=reservation.requester_nsa,
-        provider_nsa=reservation.provider_nsa,
+        provider_nsa=settings.provider_nsa,
         reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
         correlation_id=correlation_id,
     )
@@ -641,7 +797,7 @@ async def terminate_reservation(
     log.info("Terminate request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = store.get(connectionId)
+    reservation = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status not in (ReservationStatus.RESERVED, ReservationStatus.FAILED):
@@ -657,7 +813,7 @@ async def terminate_reservation(
 
     header = NsiHeader(
         requester_nsa=reservation.requester_nsa,
-        provider_nsa=reservation.provider_nsa,
+        provider_nsa=settings.provider_nsa,
         reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
         correlation_id=correlation_id,
     )
@@ -700,11 +856,12 @@ async def terminate_reservation(
 )
 async def get_reservation(
     connectionId: str,
+    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
     store: ReservationStore = Depends(get_reservation_store),
 ) -> ReservationDetail:
     """Return the details of the reservation identified by ``connectionId``."""
     logger.info("Get reservation", connection_id=connectionId)
-    reservation = store.get(connectionId)
+    reservation = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     return ReservationDetail(
@@ -713,6 +870,7 @@ async def get_reservation(
         description=reservation.description,
         criteria=reservation.criteria,
         status=reservation.status,
+        lastError=reservation.last_error,
     )
 
 
@@ -722,10 +880,12 @@ async def get_reservation(
     summary="List all reservations",
 )
 async def list_reservations(
+    nsi_client: httpx.AsyncClient = Depends(get_nsi_client),
     store: ReservationStore = Depends(get_reservation_store),
 ) -> ReservationsListResponse:
     """Return a list of all reservations and their details."""
     logger.info("List all reservations")
+    await _refresh_all_reservations(nsi_client, store)
     return ReservationsListResponse(
         reservations=[
             ReservationDetail(
@@ -734,6 +894,7 @@ async def list_reservations(
                 description=r.description,
                 criteria=r.criteria,
                 status=r.status,
+                lastError=r.last_error,
             )
             for r in store.get_all()
         ]

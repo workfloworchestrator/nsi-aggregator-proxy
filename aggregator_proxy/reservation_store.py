@@ -15,10 +15,11 @@ class Reservation:
     status: ReservationStatus
     global_reservation_id: str | None
     description: str
-    criteria: CriteriaResponse
-    requester_nsa: str
-    provider_nsa: str
-    callback_url: str
+    criteria: CriteriaResponse | None = None
+    requester_nsa: str = ""
+    provider_nsa: str = ""
+    callback_url: str = ""
+    last_error: str | None = None
 
 
 class ReservationStore:

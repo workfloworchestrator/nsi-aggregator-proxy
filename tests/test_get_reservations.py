@@ -6,7 +6,13 @@ from fastapi.testclient import TestClient
 
 from aggregator_proxy.main import app
 from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
+from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
+from tests.conftest import (
+    build_empty_query_summary_sync_response,
+    build_query_notification_sync_response,
+    build_query_summary_sync_response,
+)
 
 CONNECTION_ID_1 = "conn-001"
 CONNECTION_ID_2 = "conn-002"
@@ -38,6 +44,37 @@ def _make_reservation(
     )
 
 
+def _nsi_handler(request: httpx.Request) -> httpx.Response:
+    """Mock NSI handler that responds to querySummarySync with an empty result."""
+    cid = parse_correlation_id(request.content)
+    body = request.content.decode()
+    if "queryNotificationSync" in body:
+        return httpx.Response(200, content=build_query_notification_sync_response(cid))
+    if "querySummarySync" in body:
+        return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+    return httpx.Response(200)
+
+
+def _nsi_handler_with_reservation(connection_id: str, provision_state: str = "Released") -> object:
+    """Return an NSI handler that returns a querySummarySyncConfirmed with one reservation."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cid = parse_correlation_id(request.content)
+        body = request.content.decode()
+        if "queryNotificationSync" in body:
+            return httpx.Response(200, content=build_query_notification_sync_response(cid))
+        return httpx.Response(
+            200,
+            content=build_query_summary_sync_response(
+                connection_id=connection_id,
+                correlation_id=cid,
+                provision_state=provision_state,
+            ),
+        )
+
+    return handler
+
+
 @pytest.fixture()
 def store() -> ReservationStore:
     return ReservationStore()
@@ -46,7 +83,7 @@ def store() -> ReservationStore:
 @pytest.fixture()
 def _app_state(store: ReservationStore) -> None:
     """Inject test state into the FastAPI app."""
-    app.state.nsi_client = httpx.AsyncClient()
+    app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(_nsi_handler))
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = store
 
@@ -67,12 +104,16 @@ class TestGetReservation:
         reservation = _make_reservation()
         store.create(reservation)
 
+        # Replace NSI client with one that returns the reservation from the aggregator
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_reservation(CONNECTION_ID_1))
+        )
+
         resp = client.get(f"/reservations/{CONNECTION_ID_1}")
 
         assert resp.status_code == 200
         body = resp.json()
         assert body["connectionId"] == CONNECTION_ID_1
-        assert body["globalReservationId"] == "urn:uuid:550e8400-e29b-41d4-a716-446655440000"
         assert body["description"] == "test reservation"
         assert body["status"] == "RESERVED"
         assert body["criteria"]["version"] == 1
@@ -82,6 +123,10 @@ class TestGetReservation:
 
     def test_known_connection_without_global_id(self, client: TestClient, store: ReservationStore) -> None:
         store.create(_make_reservation(global_reservation_id=None))
+
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_reservation(CONNECTION_ID_1))
+        )
 
         resp = client.get(f"/reservations/{CONNECTION_ID_1}")
 
@@ -114,6 +159,3 @@ class TestListReservations:
         assert len(body["reservations"]) == 2
         ids = {r["connectionId"] for r in body["reservations"]}
         assert ids == {CONNECTION_ID_1, CONNECTION_ID_2}
-        statuses = {r["connectionId"]: r["status"] for r in body["reservations"]}
-        assert statuses[CONNECTION_ID_1] == "RESERVED"
-        assert statuses[CONNECTION_ID_2] == "ACTIVATED"

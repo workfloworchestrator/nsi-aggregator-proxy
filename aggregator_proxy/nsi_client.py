@@ -22,7 +22,9 @@ def create_nsi_client() -> httpx.AsyncClient:
         client_cert=settings.client_cert,
         ca_file=settings.ca_file,
     )
-    cert = (str(settings.client_cert), str(settings.client_key)) if settings.client_cert and settings.client_key else None
+    cert = (
+        (str(settings.client_cert), str(settings.client_key)) if settings.client_cert and settings.client_key else None
+    )
     verify: str | bool = str(settings.ca_file) if settings.ca_file else True
     return httpx.AsyncClient(
         cert=cert,

@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # Full URL of the NSI provider endpoint on the aggregator.
     provider_url: str
 
+    # NSA URNs for outbound NSI SOAP headers.
+    requester_nsa: str
+    provider_nsa: str
+
     # Client certificate authentication towards the NSI aggregator.
     # When not set, no client certificate is presented.
     client_cert: Path | None = None

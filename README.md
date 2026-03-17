@@ -221,7 +221,8 @@ Get the details of the reservation identified by `connectionId`.
         "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
       }
     },
-    "status": "ACTIVATED"
+    "status": "ACTIVATED",
+    "lastError": null
   }
 ```
 
@@ -231,7 +232,7 @@ Get a list of all reservations and details.
 
 #### Response
 
-A list of reservation details as returned by `GET /reservations/{connectionId}`.
+A list of reservation details as returned by `GET /reservations/{connectionId}`, including `lastError` for each reservation.
 
 ```json
 {
@@ -312,6 +313,10 @@ the capacity is a negative number.
 }
 ```
 
+### Error Events
+
+Error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) from the aggregator are detected via `queryNotificationSync` during state refresh. These can cause the status to become `FAILED` even when the NSI sub-state machines appear normal. The `lastError` field contains a human-readable description of the most recent error event.
+
 ### Callback Payload
 
-A payload identical to the one returned by `GET /reservations/{connectionId}`.
+A payload identical to the one returned by `GET /reservations/{connectionId}`. The `lastError` field is included when the status is `FAILED` due to an error event.

@@ -17,9 +17,9 @@ _UUID_URN_RE = re.compile(
 _VLAN_RANGE = r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*"
 _STP_RE = re.compile(
     r"^urn:ogf:network:"
-    r"[A-Za-z0-9.\-]+:"           # FQDN
+    r"[A-Za-z0-9.\-]+:"  # FQDN
     r"[0-9]{4}(?:[0-9]{2}(?:[0-9]{2})?)?"  # DATE: YYYY[MM[DD]]
-    r":[A-Za-z0-9_.:\-]+"         # OPAQUE-PART
+    r":[A-Za-z0-9_.:\-]+"  # OPAQUE-PART
     r"(?:\?vlan=" + _VLAN_RANGE + r")?"  # optional ?vlan=RANGE
     r"(?:#[A-Za-z0-9_.:\-]+)?$",  # optional #FRAGMENT
 )
@@ -60,8 +60,7 @@ class P2PS(BaseModel):
         """Validate STP is a well-formed Network URN (NURN)."""
         if not _STP_RE.match(v):
             raise ValueError(
-                "STP must be a Network URN of the form "
-                "urn:ogf:network:<FQDN>:<DATE>:<OPAQUE-PART>[?vlan=<RANGE>]"
+                "STP must be a Network URN of the form urn:ogf:network:<FQDN>:<DATE>:<OPAQUE-PART>[?vlan=<RANGE>]"
             )
         return v
 
@@ -102,6 +101,7 @@ class ReservationRequest(BaseModel):
     description: str
     criteria: Criteria
     requesterNSA: str = Field(..., description="NSA URN of the requesting party.")
+    providerNSA: str = Field(..., description="NSA URN of the target aggregator.")
 
     @field_validator("globalReservationId")
     @classmethod
@@ -109,22 +109,17 @@ class ReservationRequest(BaseModel):
         """Validate UUID URN format when globalReservationId is supplied."""
         if v is not None and not _UUID_URN_RE.match(v):
             raise ValueError(
-                "globalReservationId must be a UUID URN of the form "
-                "urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                "globalReservationId must be a UUID URN of the form urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
             )
         return v
-    providerNSA: str = Field(..., description="NSA URN of the target aggregator.")
-    callbackURL: AnyHttpUrl = Field(
-        ..., description="URL to receive the reservation result callback."
-    )
+
+    callbackURL: AnyHttpUrl = Field(..., description="URL to receive the reservation result callback.")
 
 
 class CallbackRequest(BaseModel):
     """Payload for provision, release and terminate requests."""
 
-    callbackURL: AnyHttpUrl = Field(
-        ..., description="URL to receive the operation result callback."
-    )
+    callbackURL: AnyHttpUrl = Field(..., description="URL to receive the operation result callback.")
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +133,9 @@ class ReservationDetail(BaseModel):
     globalReservationId: str | None = None
     connectionId: str
     description: str
-    criteria: CriteriaResponse
+    criteria: CriteriaResponse | None = None
     status: ReservationStatus
+    lastError: str | None = None
 
 
 class ReservationsListResponse(BaseModel):

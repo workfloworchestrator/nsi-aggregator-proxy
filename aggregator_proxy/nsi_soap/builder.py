@@ -31,10 +31,10 @@ def _build_envelope(header: NsiHeader) -> tuple[etree._Element, etree._Element]:
     soap_header = etree.SubElement(envelope, f"{_S}Header")
     nsi_hdr = etree.SubElement(soap_header, f"{_H}nsiHeader")
     etree.SubElement(nsi_hdr, "protocolVersion").text = _PROTOCOL_VERSION
-    etree.SubElement(nsi_hdr, "correlationId").text   = header.correlation_id
-    etree.SubElement(nsi_hdr, "requesterNSA").text    = header.requester_nsa
-    etree.SubElement(nsi_hdr, "providerNSA").text     = header.provider_nsa
-    etree.SubElement(nsi_hdr, "replyTo").text         = header.reply_to
+    etree.SubElement(nsi_hdr, "correlationId").text = header.correlation_id
+    etree.SubElement(nsi_hdr, "requesterNSA").text = header.requester_nsa
+    etree.SubElement(nsi_hdr, "providerNSA").text = header.provider_nsa
+    etree.SubElement(nsi_hdr, "replyTo").text = header.reply_to
     body = etree.SubElement(envelope, f"{_S}Body")
     return envelope, body
 
@@ -64,14 +64,14 @@ def build_reserve(
     criteria = etree.SubElement(reserve, "criteria", version="1")
     schedule = etree.SubElement(criteria, "schedule")
     etree.SubElement(schedule, "startTime").text = start_time
-    etree.SubElement(schedule, "endTime").text   = end_time
+    etree.SubElement(schedule, "endTime").text = end_time
     etree.SubElement(criteria, "serviceType").text = service_type
     p2ps = etree.SubElement(criteria, f"{_P}p2ps")
-    etree.SubElement(p2ps, "capacity").text       = str(capacity)
+    etree.SubElement(p2ps, "capacity").text = str(capacity)
     etree.SubElement(p2ps, "directionality").text = "Bidirectional"
-    etree.SubElement(p2ps, "symmetricPath").text  = "true"
-    etree.SubElement(p2ps, "sourceSTP").text      = source_stp
-    etree.SubElement(p2ps, "destSTP").text        = dest_stp
+    etree.SubElement(p2ps, "symmetricPath").text = "true"
+    etree.SubElement(p2ps, "sourceSTP").text = source_stp
+    etree.SubElement(p2ps, "destSTP").text = dest_stp
     return _serialize(envelope)
 
 
@@ -101,3 +101,22 @@ def build_release(header: NsiHeader, connection_id: str) -> bytes:
 def build_terminate(header: NsiHeader, connection_id: str) -> bytes:
     """Build a NSI terminate request envelope."""
     return _build_connection_id_operation(header, "terminate", connection_id)
+
+
+def build_query_summary_sync(header: NsiHeader, connection_id: str | None = None) -> bytes:
+    """Build a NSI querySummarySync request envelope."""
+    envelope, body = _build_envelope(header)
+    qss = etree.SubElement(body, f"{_C}querySummarySync")
+    if connection_id is not None:
+        etree.SubElement(qss, "connectionId").text = connection_id
+    return _serialize(envelope)
+
+
+def build_query_notification_sync(header: NsiHeader, connection_id: str) -> bytes:
+    """Build a NSI queryNotificationSync request envelope."""
+    envelope, body = _build_envelope(header)
+    qns = etree.SubElement(body, f"{_C}queryNotificationSync")
+    etree.SubElement(qns, "connectionId").text = connection_id
+    etree.SubElement(qns, "startNotificationId").text = "1"
+    etree.SubElement(qns, "endNotificationId").text = "2147483647"
+    return _serialize(envelope)

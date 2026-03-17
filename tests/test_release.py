@@ -11,6 +11,11 @@ from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
 from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
+from tests.conftest import (
+    build_empty_query_summary_sync_response,
+    build_query_notification_sync_response,
+    build_query_summary_sync_response,
+)
 
 _C = NSMAP["nsi_ctypes"]
 _H = NSMAP["nsi_headers"]
@@ -103,7 +108,7 @@ def store() -> ReservationStore:
 @pytest.fixture()
 def _app_state(store: ReservationStore) -> None:
     """Inject test state into the FastAPI app."""
-    app.state.nsi_client = httpx.AsyncClient()
+    app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(_nsi_handler))
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = store
 
@@ -113,9 +118,36 @@ def client(_app_state: None) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
+def _make_nsi_handler(
+    provision_state: str = "Provisioned",
+    data_plane_active: bool = True,
+) -> object:
+    """Create a mock NSI handler that returns the given states for querySummarySync."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cid = parse_correlation_id(request.content)
+        body = request.content.decode()
+        if "queryNotificationSync" in body:
+            return httpx.Response(200, content=build_query_notification_sync_response(cid))
+        if "querySummarySync" in body:
+            if CONNECTION_ID in body:
+                return httpx.Response(
+                    200,
+                    content=build_query_summary_sync_response(
+                        connection_id=CONNECTION_ID,
+                        correlation_id=cid,
+                        provision_state=provision_state,
+                        data_plane_active=data_plane_active,
+                    ),
+                )
+            return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+        return httpx.Response(200, content=_acknowledgment_xml(cid))
+
+    return handler
+
+
 def _nsi_handler(request: httpx.Request) -> httpx.Response:
-    cid = parse_correlation_id(request.content)
-    return httpx.Response(200, content=_acknowledgment_xml(cid))
+    return _make_nsi_handler()(request)  # type: ignore[operator]
 
 
 def _callback_handler(request: httpx.Request) -> httpx.Response:
@@ -132,8 +164,14 @@ class TestReleaseValidation:
         )
         assert resp.status_code == 404
 
-    def test_release_non_activated_state_returns_409(self, client: TestClient, store: ReservationStore) -> None:
+    def test_release_non_activated_state_returns_409(self, store: ReservationStore) -> None:
         store.create(_make_reservation(status=ReservationStatus.RESERVED))
+        # Mock returns Released+inactive → RESERVED, so release is rejected
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_make_nsi_handler(provision_state="Released", data_plane_active=False))
+        )
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             f"/reservations/{CONNECTION_ID}/release",
             json={"callbackURL": CALLBACK_URL},

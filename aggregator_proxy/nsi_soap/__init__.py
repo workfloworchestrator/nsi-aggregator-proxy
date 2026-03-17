@@ -3,6 +3,8 @@
 from aggregator_proxy.nsi_soap.builder import (
     NsiHeader,
     build_provision,
+    build_query_notification_sync,
+    build_query_summary_sync,
     build_release,
     build_reserve,
     build_reserve_commit,
@@ -10,9 +12,12 @@ from aggregator_proxy.nsi_soap.builder import (
 )
 from aggregator_proxy.nsi_soap.parser import (
     Acknowledgment,
+    ConnectionStates,
     DataPlaneStateChange,
+    ErrorEvent,
     NsiMessage,
     ProvisionConfirmed,
+    QueryReservation,
     ReleaseConfirmed,
     ReserveCommitConfirmed,
     ReserveCommitFailed,
@@ -24,19 +29,26 @@ from aggregator_proxy.nsi_soap.parser import (
     TerminateConfirmed,
     parse,
     parse_correlation_id,
+    parse_query_notification_sync,
+    parse_query_summary_sync,
 )
 
 __all__ = [
     "NsiHeader",
     "build_provision",
+    "build_query_notification_sync",
+    "build_query_summary_sync",
     "build_release",
     "build_reserve",
     "build_reserve_commit",
     "build_terminate",
     "Acknowledgment",
+    "ConnectionStates",
     "DataPlaneStateChange",
+    "ErrorEvent",
     "NsiMessage",
     "ProvisionConfirmed",
+    "QueryReservation",
     "ReleaseConfirmed",
     "ReserveCommitConfirmed",
     "ReserveCommitFailed",
@@ -48,4 +60,6 @@ __all__ = [
     "TerminateConfirmed",
     "parse",
     "parse_correlation_id",
+    "parse_query_notification_sync",
+    "parse_query_summary_sync",
 ]

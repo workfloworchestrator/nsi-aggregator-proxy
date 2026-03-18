@@ -35,6 +35,7 @@ class Reservation:
     provider_nsa: str = ""
     callback_url: str = ""
     last_error: str | None = None
+    seen_error_notification_ids: set[int] | None = None
 
 
 class ReservationStore:

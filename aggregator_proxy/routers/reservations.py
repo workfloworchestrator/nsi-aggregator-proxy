@@ -178,18 +178,39 @@ def _update_store_from_query(
             existing.last_error = last_error
         if criteria is not None:
             existing.criteria = criteria
-        return existing
+        reservation = existing
+    else:
+        reservation = Reservation(
+            connection_id=qr.connection_id,
+            status=mapped_status,
+            global_reservation_id=qr.global_reservation_id,
+            description=qr.description,
+            criteria=criteria,
+            requester_nsa=qr.requester_nsa,
+            last_error=last_error,
+        )
+        store.create(reservation)
 
-    reservation = Reservation(
-        connection_id=qr.connection_id,
-        status=mapped_status,
-        global_reservation_id=qr.global_reservation_id,
-        description=qr.description,
-        criteria=criteria,
-        requester_nsa=qr.requester_nsa,
-        last_error=last_error,
-    )
-    store.create(reservation)
+    if error_events:
+        seen_ids = reservation.seen_error_notification_ids
+        new_events = [e for e in error_events if seen_ids is None or e.notification_id not in seen_ids]
+        if new_events:
+            logger.info(
+                "New error events detected for reservation",
+                connection_id=qr.connection_id,
+                error_event_count=len(new_events),
+                events=[e.event for e in new_events],
+            )
+        else:
+            logger.debug(
+                "Error events detected for reservation (already seen)",
+                connection_id=qr.connection_id,
+                error_event_count=len(error_events),
+            )
+        if reservation.seen_error_notification_ids is None:
+            reservation.seen_error_notification_ids = set()
+        reservation.seen_error_notification_ids.update(e.notification_id for e in error_events)
+
     return reservation
 
 
@@ -221,13 +242,6 @@ async def _query_error_events(
             error=str(exc),
         )
         return []
-    if events:
-        logger.info(
-            "Error events detected for reservation",
-            connection_id=connection_id,
-            error_event_count=len(events),
-            events=[e.event for e in events],
-        )
     return events
 
 
@@ -282,7 +296,7 @@ async def _refresh_all_reservations(
         _update_store_from_query(store, qr)
 
     if needs_notification:
-        logger.info("Checking error events for active reservations", count=len(needs_notification))
+        logger.debug("Checking error events for active reservations", count=len(needs_notification))
         error_results = await asyncio.gather(
             *(_query_error_events(nsi_client, qr.connection_id) for qr in needs_notification)
         )

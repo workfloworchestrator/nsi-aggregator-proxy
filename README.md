@@ -9,7 +9,6 @@ The proxy handles all NSI protocol complexity internally: it translates REST cal
 The proxy reduces the NSI protocol's multiple concurrent state machines (reservation, provision, lifecycle, data plane) into a single linear state machine:
 
 ```mermaid
-%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
     [*] --> RESERVING : Reserve
     state RESERVING <<choice>>
@@ -177,7 +176,6 @@ See [API Responses](#api-responses).
 #### Internal NSI Flow
 
 ```mermaid
-%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
     [*] --> ReserveStart : POST /reservations
     state ReserveStart <<choice>>
@@ -215,7 +213,6 @@ See [API Responses](#api-responses).
 #### Internal NSI Flow
 
 ```mermaid
-%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
     [*] --> ProvisionStart : POST /reservations/{connectionId}/provision
     state ProvisionStart <<choice>>
@@ -250,7 +247,6 @@ See [API Responses](#api-responses).
 #### Internal NSI Flow
 
 ```mermaid
-%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
     [*] --> ReleaseStart : POST /reservations/{connectionId}/release
     state ReleaseStart <<choice>>
@@ -285,7 +281,6 @@ See [API Responses](#api-responses).
 #### Internal NSI Flow
 
 ```mermaid
-%%{init: {"look": "handDrawn", "theme": "neutral"}}%%
 stateDiagram-v2
     [*] --> TerminateStart : DELETE /reservations/{connectionId}
     state TerminateStart <<choice>>

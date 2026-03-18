@@ -193,9 +193,7 @@ class TestErrorEventDeduplication:
     def test_no_error_events_does_not_set_seen_ids(self, _app_state: None, store: ReservationStore) -> None:
         """When no error events are returned, seen_error_notification_ids stays None."""
         store.create(_make_reservation())
-        app.state.nsi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_nsi_handler_with_error_events())
-        )
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(_nsi_handler_with_error_events()))
         client = TestClient(app, raise_server_exceptions=False)
 
         client.get(f"/reservations/{CONNECTION_ID}")
@@ -212,9 +210,7 @@ class TestErrorEventDeduplicationRefreshAll:
     which may create new reservations that don't yet exist in the store.
     """
 
-    def test_refresh_all_tracks_seen_ids_for_new_reservation(
-        self, _app_state: None, store: ReservationStore
-    ) -> None:
+    def test_refresh_all_tracks_seen_ids_for_new_reservation(self, _app_state: None, store: ReservationStore) -> None:
         """Error events discovered during refresh-all are tracked even for new reservations."""
         event_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=10)
         app.state.nsi_client = httpx.AsyncClient(

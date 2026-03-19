@@ -117,21 +117,34 @@ def test_map_nsi_states_to_status(states: ConnectionStates, expected: Reservatio
     assert map_nsi_states_to_status(states) == expected
 
 
-class TestErrorEventFlag:
-    """Tests for has_error_event parameter."""
-
-    def test_error_event_with_normal_states_yields_failed(self) -> None:
-        states = ConnectionStates("ReserveStart", "Provisioned", "Created", True)
-        assert map_nsi_states_to_status(states, has_error_event=True) == ReservationStatus.FAILED
-
-    def test_error_event_does_not_override_terminated(self) -> None:
-        states = ConnectionStates("ReserveStart", "Released", "Terminated", False)
-        assert map_nsi_states_to_status(states, has_error_event=True) == ReservationStatus.TERMINATED
-
-    def test_error_event_with_failed_lifecycle_stays_failed(self) -> None:
-        states = ConnectionStates("ReserveStart", "Released", "Failed", False)
-        assert map_nsi_states_to_status(states, has_error_event=True) == ReservationStatus.FAILED
-
-    def test_error_event_false_does_not_affect_result(self) -> None:
-        states = ConnectionStates("ReserveStart", "Provisioned", "Created", True)
-        assert map_nsi_states_to_status(states, has_error_event=False) == ReservationStatus.ACTIVATED
+@pytest.mark.parametrize(
+    ("states", "has_error_event", "expected"),
+    [
+        pytest.param(
+            ConnectionStates("ReserveStart", "Provisioned", "Created", True),
+            True,
+            ReservationStatus.FAILED,
+            id="error-with-normal-states",
+        ),
+        pytest.param(
+            ConnectionStates("ReserveStart", "Released", "Failed", False),
+            True,
+            ReservationStatus.FAILED,
+            id="error-with-failed-lifecycle",
+        ),
+        pytest.param(
+            ConnectionStates("ReserveStart", "Released", "Terminated", False),
+            True,
+            ReservationStatus.TERMINATED,
+            id="error-does-not-override-terminated",
+        ),
+        pytest.param(
+            ConnectionStates("ReserveStart", "Provisioned", "Created", True),
+            False,
+            ReservationStatus.ACTIVATED,
+            id="no-error-normal-result",
+        ),
+    ],
+)
+def test_error_event_flag(states: ConnectionStates, has_error_event: bool, expected: ReservationStatus) -> None:
+    assert map_nsi_states_to_status(states, has_error_event=has_error_event) == expected

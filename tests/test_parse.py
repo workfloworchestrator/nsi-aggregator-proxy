@@ -175,10 +175,71 @@ class TestParseReserveFailed:
         assert msg.service_exception.variables[0] == Variable(type="capacity", value="1000")
         assert msg.service_exception.variables[1] == Variable(type="available", value="500")
 
-    def test_reserve_failed_missing_service_exception_raises(self) -> None:
-        xml = _envelope("<reserveFailed><connectionId>conn-42</connectionId></reserveFailed>")
-        with pytest.raises(ValueError, match="serviceException"):
-            parse(xml)
+
+@pytest.mark.parametrize(
+    ("body_xml", "match"),
+    [
+        pytest.param(
+            "<reserveFailed><connectionId>conn-42</connectionId></reserveFailed>",
+            "serviceException",
+            id="reserve-failed",
+        ),
+        pytest.param(
+            "<reserveCommitFailed><connectionId>conn-42</connectionId></reserveCommitFailed>",
+            "serviceException",
+            id="reserve-commit-failed",
+        ),
+        pytest.param(
+            "<dataPlaneStateChange>"
+            "<connectionId>conn-42</connectionId>"
+            "<notificationId>1</notificationId>"
+            "<timeStamp>2025-06-01T12:00:00Z</timeStamp>"
+            "</dataPlaneStateChange>",
+            "dataPlaneStatus",
+            id="data-plane-state-change-missing-status",
+        ),
+        pytest.param(
+            "<unknownOperation><connectionId>conn-42</connectionId></unknownOperation>",
+            "Unknown NSI operation",
+            id="unknown-operation",
+        ),
+    ],
+)
+def test_parse_error_on_invalid_xml(body_xml: str, match: str) -> None:
+    xml = _envelope(body_xml)
+    with pytest.raises(ValueError, match=match):
+        parse(xml)
+
+
+@pytest.mark.parametrize(
+    "xml_bytes",
+    [
+        pytest.param(
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<soapenv:Envelope xmlns:soapenv="{_S}">'
+            f"<soapenv:Body/>"
+            f"</soapenv:Envelope>".encode(),
+            id="empty-body",
+        ),
+        pytest.param(
+            f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<soapenv:Envelope xmlns:soapenv="{_S}">'
+            f"<soapenv:Header/>"
+            f"</soapenv:Envelope>".encode(),
+            id="missing-body",
+        ),
+    ],
+)
+def test_parse_error_on_missing_or_empty_body(xml_bytes: bytes) -> None:
+    with pytest.raises(ValueError, match="Body"):
+        parse(xml_bytes)
+
+
+def test_malformed_xml_raises() -> None:
+    from lxml.etree import XMLSyntaxError
+
+    with pytest.raises(XMLSyntaxError):
+        parse(b"<not valid xml")
 
 
 class TestParseReserveTimeout:
@@ -218,11 +279,6 @@ class TestParseReserveCommitFailed:
         assert isinstance(msg, ReserveCommitFailed)
         assert msg.connection_id == "conn-42"
         assert msg.service_exception.error_id == "00500"
-
-    def test_reserve_commit_failed_missing_exception_raises(self) -> None:
-        xml = _envelope("<reserveCommitFailed><connectionId>conn-42</connectionId></reserveCommitFailed>")
-        with pytest.raises(ValueError, match="serviceException"):
-            parse(xml)
 
 
 class TestParseReserveCommitConfirmed:
@@ -280,16 +336,6 @@ class TestParseDataPlaneStateChange:
         assert msg.active is False
         assert msg.version_consistent is False
 
-    def test_missing_data_plane_status_raises(self) -> None:
-        xml = _envelope("""\
-<dataPlaneStateChange>
-  <connectionId>conn-42</connectionId>
-  <notificationId>1</notificationId>
-  <timeStamp>2025-06-01T12:00:00Z</timeStamp>
-</dataPlaneStateChange>""")
-        with pytest.raises(ValueError, match="dataPlaneStatus"):
-            parse(xml)
-
 
 class TestParseReleaseConfirmed:
     def test_release_confirmed(self) -> None:
@@ -312,37 +358,6 @@ class TestParseAcknowledgment:
         xml = _envelope("<acknowledgment/>")
         msg = parse(xml)
         assert isinstance(msg, Acknowledgment)
-
-
-class TestParseErrors:
-    def test_empty_body_raises(self) -> None:
-        xml = f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="{_S}">
-  <soapenv:Body/>
-</soapenv:Envelope>""".encode()
-        with pytest.raises(ValueError, match="Body"):
-            parse(xml)
-
-    def test_missing_body_raises(self) -> None:
-        xml = f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="{_S}">
-  <soapenv:Header/>
-</soapenv:Envelope>""".encode()
-        with pytest.raises(ValueError, match="Body"):
-            parse(xml)
-
-    def test_unknown_operation_raises(self) -> None:
-        xml = _envelope("<unknownOperation><connectionId>conn-42</connectionId></unknownOperation>")
-        with pytest.raises(ValueError, match="Unknown NSI operation"):
-            parse(xml)
-
-    def test_malformed_xml_raises(self) -> None:
-        from lxml.etree import XMLSyntaxError
-
-        with pytest.raises(XMLSyntaxError):
-            parse(b"<not valid xml")
 
 
 class TestParseCorrelationId:

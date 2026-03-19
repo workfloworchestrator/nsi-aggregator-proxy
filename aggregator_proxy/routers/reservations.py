@@ -54,6 +54,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveTimeout,
     ServiceException,
     TerminateConfirmed,
+    Variable,
     build_provision,
     build_query_notification_sync,
     build_query_summary_sync,
@@ -125,6 +126,13 @@ def _query_header() -> NsiHeader:
     )
 
 
+def _format_variables(variables: list[Variable] | None, indent: str = "  ") -> list[str]:
+    """Format a list of ServiceException variables as indented key=value strings."""
+    if not variables:
+        return []
+    return [f"{indent}{var.type}={var.value}" for var in variables]
+
+
 def _format_service_exception(exc: ServiceException) -> str:
     """Format a ServiceException into a human-readable string.
 
@@ -132,15 +140,11 @@ def _format_service_exception(exc: ServiceException) -> str:
     the child details are appended as they typically contain the actual error.
     """
     parts = [f"[{exc.error_id}] {exc.text} (nsaId={exc.nsa_id})"]
-    if exc.variables:
-        for var in exc.variables:
-            parts.append(f"  {var.type}={var.value}")
+    parts.extend(_format_variables(exc.variables))
     if exc.child_exceptions:
         for child in exc.child_exceptions:
             parts.append(f"  child [{child.error_id}] {child.text} (nsaId={child.nsa_id})")
-            if child.variables:
-                for var in child.variables:
-                    parts.append(f"    {var.type}={var.value}")
+            parts.extend(_format_variables(child.variables, indent="    "))
     return "\n".join(parts)
 
 

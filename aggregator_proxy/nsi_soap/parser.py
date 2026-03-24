@@ -199,18 +199,14 @@ def _require(element: etree._Element, tag: str) -> str:
 
 def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
     """Parse a serviceException (or childException) element recursively."""
-    children: list[ServiceException] = []
-    for child_el in exc_el.findall("childException"):
-        children.append(_parse_service_exception(child_el))
+    children = [_parse_service_exception(child_el) for child_el in exc_el.findall("childException")]
 
-    variables: list[Variable] = []
     variables_el = exc_el.find("variables")
-    if variables_el is not None:
-        for var_el in variables_el.findall("variable"):
-            var_type = var_el.get("type", "")
-            var_value = var_el.findtext("value") or ""
-            if var_type or var_value:
-                variables.append(Variable(type=var_type, value=var_value))
+    variables = [
+        Variable(type=var_el.get("type", ""), value=var_el.findtext("value") or "")
+        for var_el in (variables_el.findall("variable") if variables_el is not None else [])
+        if var_el.get("type", "") or var_el.findtext("value") or ""
+    ]
 
     return ServiceException(
         nsa_id=_require(exc_el, "nsaId"),

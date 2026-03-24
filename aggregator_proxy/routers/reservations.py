@@ -54,6 +54,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveTimeout,
     ServiceException,
     TerminateConfirmed,
+    Variable,
     build_provision,
     build_query_notification_sync,
     build_query_summary_sync,
@@ -125,6 +126,13 @@ def _query_header() -> NsiHeader:
     )
 
 
+def _format_variables(variables: list[Variable] | None, indent: str = "  ") -> list[str]:
+    """Format a list of ServiceException variables as indented key=value strings."""
+    if not variables:
+        return []
+    return [f"{indent}{var.type}={var.value}" for var in variables]
+
+
 def _format_service_exception(exc: ServiceException) -> str:
     """Format a ServiceException into a human-readable string.
 
@@ -132,15 +140,11 @@ def _format_service_exception(exc: ServiceException) -> str:
     the child details are appended as they typically contain the actual error.
     """
     parts = [f"[{exc.error_id}] {exc.text} (nsaId={exc.nsa_id})"]
-    if exc.variables:
-        for var in exc.variables:
-            parts.append(f"  {var.type}={var.value}")
+    parts.extend(_format_variables(exc.variables))
     if exc.child_exceptions:
         for child in exc.child_exceptions:
             parts.append(f"  child [{child.error_id}] {child.text} (nsaId={child.nsa_id})")
-            if child.variables:
-                for var in child.variables:
-                    parts.append(f"    {var.type}={var.value}")
+            parts.extend(_format_variables(child.variables, indent="    "))
     return "\n".join(parts)
 
 
@@ -336,17 +340,19 @@ async def _complete_reserve(
             await fail("no reserveConfirmed received within timeout")
             return
 
-        if isinstance(msg, ReserveFailed):
-            await fail(f"reserveFailed: {_format_service_exception(msg.service_exception)}")
-            return
-
-        if isinstance(msg, ReserveTimeout):
-            await fail("reserveTimeout from aggregator")
-            return
-
-        assert isinstance(msg, ReserveConfirmed)
-        store.update_criteria(connection_id, msg)
-        log.info("Reserve confirmed by aggregator")
+        match msg:
+            case ReserveFailed():
+                await fail(f"reserveFailed: {_format_service_exception(msg.service_exception)}")
+                return
+            case ReserveTimeout():
+                await fail("reserveTimeout from aggregator")
+                return
+            case ReserveConfirmed():
+                store.update_criteria(connection_id, msg)
+                log.info("Reserve confirmed by aggregator")
+            case _:
+                await fail(f"unexpected message: {type(msg).__name__}")
+                return
 
         # --- Phase 2: send reserveCommit, wait for commit result ---
         commit_correlation_id = f"urn:uuid:{uuid4()}"
@@ -380,11 +386,15 @@ async def _complete_reserve(
             await fail("no reserveCommitConfirmed received within timeout")
             return
 
-        if isinstance(commit_msg, ReserveCommitFailed):
-            await fail(f"reserveCommitFailed: {_format_service_exception(commit_msg.service_exception)}")
-            return
-
-        assert isinstance(commit_msg, ReserveCommitConfirmed)
+        match commit_msg:
+            case ReserveCommitFailed():
+                await fail(f"reserveCommitFailed: {_format_service_exception(commit_msg.service_exception)}")
+                return
+            case ReserveCommitConfirmed():
+                pass
+            case _:
+                await fail(f"unexpected message: {type(commit_msg).__name__}")
+                return
         store.update_status(connection_id, ReservationStatus.RESERVED)
         reservation = store.get(connection_id)
         if reservation is not None:
@@ -545,11 +555,12 @@ async def _complete_provision(
             await fail("no provisionConfirmed received within timeout")
             return
 
-        if not isinstance(msg, ProvisionConfirmed):
-            await fail(f"unexpected message: {type(msg).__name__}")
-            return
-
-        log.info("Provision confirmed by aggregator, waiting for data plane activation")
+        match msg:
+            case ProvisionConfirmed():
+                log.info("Provision confirmed by aggregator, waiting for data plane activation")
+            case _:
+                await fail(f"unexpected message: {type(msg).__name__}")
+                return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
         remaining = float(settings.dataplane_timeout)
@@ -566,19 +577,21 @@ async def _complete_provision(
             elapsed = asyncio.get_event_loop().time() - start
             remaining -= elapsed
 
-            if not isinstance(dp_msg, DataPlaneStateChange):
-                log.warning("Unexpected message while waiting for dataPlaneStateChange", msg_type=type(dp_msg).__name__)
-                continue
-
-            if dp_msg.active:
-                store.update_status(connection_id, ReservationStatus.ACTIVATED)
-                reservation = store.get(connection_id)
-                if reservation is not None:
-                    await _send_callback(callback_client, reservation.callback_url, reservation)
-                log.info("Data plane active, state is ACTIVATED")
-                return
-
-            log.debug("DataPlaneStateChange active=False, continuing to wait")
+            match dp_msg:
+                case DataPlaneStateChange(active=True):
+                    store.update_status(connection_id, ReservationStatus.ACTIVATED)
+                    reservation = store.get(connection_id)
+                    if reservation is not None:
+                        await _send_callback(callback_client, reservation.callback_url, reservation)
+                    log.info("Data plane active, state is ACTIVATED")
+                    return
+                case DataPlaneStateChange(active=False):
+                    log.debug("DataPlaneStateChange active=False, continuing to wait")
+                case _:
+                    log.warning(
+                        "Unexpected message while waiting for dataPlaneStateChange",
+                        msg_type=type(dp_msg).__name__,
+                    )
 
         await fail("no DataPlaneStateChange(active=True) received within timeout")
 
@@ -696,11 +709,12 @@ async def _complete_release(
             await fail("no releaseConfirmed received within timeout")
             return
 
-        if not isinstance(msg, ReleaseConfirmed):
-            await fail(f"unexpected message: {type(msg).__name__}")
-            return
-
-        log.info("Release confirmed by aggregator, waiting for data plane deactivation")
+        match msg:
+            case ReleaseConfirmed():
+                log.info("Release confirmed by aggregator, waiting for data plane deactivation")
+            case _:
+                await fail(f"unexpected message: {type(msg).__name__}")
+                return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
         remaining = float(settings.dataplane_timeout)
@@ -717,19 +731,21 @@ async def _complete_release(
             elapsed = asyncio.get_event_loop().time() - start
             remaining -= elapsed
 
-            if not isinstance(dp_msg, DataPlaneStateChange):
-                log.warning("Unexpected message while waiting for dataPlaneStateChange", msg_type=type(dp_msg).__name__)
-                continue
-
-            if not dp_msg.active:
-                store.update_status(connection_id, ReservationStatus.RESERVED)
-                reservation = store.get(connection_id)
-                if reservation is not None:
-                    await _send_callback(callback_client, reservation.callback_url, reservation)
-                log.info("Data plane deactivated, state is RESERVED")
-                return
-
-            log.debug("DataPlaneStateChange active=True, continuing to wait")
+            match dp_msg:
+                case DataPlaneStateChange(active=False):
+                    store.update_status(connection_id, ReservationStatus.RESERVED)
+                    reservation = store.get(connection_id)
+                    if reservation is not None:
+                        await _send_callback(callback_client, reservation.callback_url, reservation)
+                    log.info("Data plane deactivated, state is RESERVED")
+                    return
+                case DataPlaneStateChange(active=True):
+                    log.debug("DataPlaneStateChange active=True, continuing to wait")
+                case _:
+                    log.warning(
+                        "Unexpected message while waiting for dataPlaneStateChange",
+                        msg_type=type(dp_msg).__name__,
+                    )
 
         await fail("no DataPlaneStateChange(active=False) received within timeout")
 
@@ -845,11 +861,12 @@ async def _complete_terminate(
             await terminated("no terminateConfirmed received within timeout")
             return
 
-        if not isinstance(msg, TerminateConfirmed):
-            await terminated(f"unexpected message: {type(msg).__name__}")
-            return
-
-        await terminated("terminateConfirmed received")
+        match msg:
+            case TerminateConfirmed():
+                await terminated("terminateConfirmed received")
+            case _:
+                await terminated(f"unexpected message: {type(msg).__name__}")
+                return
 
     except Exception:
         log.exception("Unexpected error in _complete_terminate")

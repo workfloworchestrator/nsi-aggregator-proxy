@@ -4,6 +4,26 @@ A REST API proxy that sits in front of an NSI (Network Service Interface) aggreg
 
 The proxy handles all NSI protocol complexity internally: it translates REST calls into NSI SOAP messages, manages asynchronous NSI callbacks, automatically commits reservations, tracks data plane state changes, and delivers results to a caller-specified callback URL.
 
+## Project ANA-GRAM
+
+This software is being developed by the 
+[Advanced North-Atlantic Consortium](https://www.anaeng.global/), 
+a cooperation between National Education and Research Networks (NRENs) and 
+research partners to provide network connectivity for research and education 
+across the North-Atlantic, as part of the ANA-GRAM project. 
+
+The goal of the ANA-GRAM project is to federate the ANA trans-Atlantic links through
+[Network Service Interface (NSI)](https://ogf.org/documents/GFD.237.pdf)-based automation.
+This will enable the automated provisioning of L2 circuits spanning different domains 
+between research parties on other sides of the Atlantic. The ANA-GRAM project is 
+spearheaded by the ANA Platform & Requirements Working Group, under guidance of the 
+ANA Engineering and ANA Planning Groups.  
+
+<p align="center" width="50%">
+    <img width="50%" src="/artwork/ana-logo-scaled-ab2.png">
+</p>
+
+
 ## Simplified Connection State Machine
 
 The proxy reduces the NSI protocol's multiple concurrent state machines (reservation, provision, lifecycle, data plane) into a single linear state machine:

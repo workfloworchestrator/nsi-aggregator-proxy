@@ -78,7 +78,12 @@ CallbackClient = Annotated[httpx.AsyncClient, Depends(get_callback_client)]
 Store = Annotated[ReservationStore, Depends(get_reservation_store)]
 
 ACCEPTED_TYPE = "https://github.com/workfloworchestrator/nsi-aggregator-proxy#202-accepted"
-_SOAP_HEADERS = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'}
+_SOAP_ACTION_BASE = "http://schemas.ogf.org/nsi/2013/12/connection/service"
+
+
+def _soap_headers(operation: str) -> dict[str, str]:
+    """Return SOAP HTTP headers with the correct SOAPAction for the given NSI operation."""
+    return {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{_SOAP_ACTION_BASE}/{operation}"'}
 _DEFAULT_SERVICE_TYPE = "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE"
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
@@ -227,7 +232,9 @@ async def _query_error_events(
     soap_bytes = build_query_notification_sync(header, connection_id)
     logger.debug("Outbound SOAP queryNotificationSync request", xml=soap_bytes.decode(), connection_id=connection_id)
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("queryNotificationSync")
+        )
         response.raise_for_status()
     except Exception as exc:
         logger.error(
@@ -258,7 +265,9 @@ async def _refresh_reservation(
     header = _query_header()
     soap_bytes = build_query_summary_sync(header, connection_id=connection_id)
     logger.debug("Outbound SOAP querySummarySync request", xml=soap_bytes.decode(), connection_id=connection_id)
-    response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+    response = await nsi_client.post(
+        settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
+    )
     response.raise_for_status()
     logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
     reservations = parse_query_summary_sync(response.content)
@@ -280,7 +289,9 @@ async def _refresh_all_reservations(
     header = _query_header()
     soap_bytes = build_query_summary_sync(header)
     logger.debug("Outbound SOAP querySummarySync (all) request", xml=soap_bytes.decode())
-    response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+    response = await nsi_client.post(
+        settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
+    )
     response.raise_for_status()
     logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
     reservations = parse_query_summary_sync(response.content)
@@ -369,7 +380,9 @@ async def _complete_reserve(
         log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
         log.info("Sending reserveCommit to aggregator")
         try:
-            response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+            response = await nsi_client.post(
+                settings.provider_url, content=soap_bytes, headers=_soap_headers("reserveCommit")
+            )
             response.raise_for_status()
         except Exception as exc:
             store.cancel_pending(commit_correlation_id)
@@ -474,7 +487,9 @@ async def create_reservation(
     log.info("Sending reserve request to aggregator")
 
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("reserve")
+        )
         response.raise_for_status()
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -649,7 +664,9 @@ async def provision_reservation(
     log.info("Sending provision request to aggregator")
 
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("provision")
+        )
         response.raise_for_status()
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -803,7 +820,9 @@ async def release_reservation(
     log.info("Sending release request to aggregator")
 
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("release")
+        )
         response.raise_for_status()
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -922,7 +941,9 @@ async def terminate_reservation(
     log.info("Sending terminate request to aggregator")
 
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_SOAP_HEADERS)
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("terminate")
+        )
         response.raise_for_status()
     except Exception as exc:
         store.cancel_pending(correlation_id)

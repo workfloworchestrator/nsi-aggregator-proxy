@@ -15,6 +15,8 @@
 
 """Factory for the shared httpx client that talks to the NSI aggregator."""
 
+import ssl
+
 import httpx
 import structlog
 
@@ -26,10 +28,11 @@ logger = structlog.get_logger(__name__)
 def create_nsi_client() -> httpx.AsyncClient:
     """Create an async httpx client configured for mTLS against the aggregator.
 
-    The client is configured with:
-    - ``cert`` — the client certificate and private key used for mutual TLS.
-    - ``verify`` — the CA bundle used to verify the aggregator's server
-      certificate.
+    Builds an ``ssl.SSLContext`` directly rather than using httpx's deprecated
+    ``cert=`` / ``verify=<str>`` parameters.  This ensures the full certificate
+    chain (including intermediates) is sent during the TLS handshake, which is
+    required by ingress controllers that verify the client certificate against a
+    root CA.
     """
     logger.debug(
         "Creating NSI client",
@@ -37,11 +40,10 @@ def create_nsi_client() -> httpx.AsyncClient:
         client_cert=settings.client_cert,
         ca_file=settings.ca_file,
     )
-    cert = (
-        (str(settings.client_cert), str(settings.client_key)) if settings.client_cert and settings.client_key else None
-    )
-    verify: str | bool = str(settings.ca_file) if settings.ca_file else True
-    return httpx.AsyncClient(
-        cert=cert,
-        verify=verify,
-    )
+    if settings.ca_file:
+        ssl_context = ssl.create_default_context(cafile=str(settings.ca_file))
+    else:
+        ssl_context = ssl.create_default_context()
+    if settings.client_cert and settings.client_key:
+        ssl_context.load_cert_chain(certfile=str(settings.client_cert), keyfile=str(settings.client_key))
+    return httpx.AsyncClient(verify=ssl_context)

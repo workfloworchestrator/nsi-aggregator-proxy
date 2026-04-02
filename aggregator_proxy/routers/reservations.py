@@ -292,6 +292,12 @@ async def _refresh_all_reservations(
     response = await nsi_client.post(
         settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
     )
+    if not response.is_success:
+        logger.error(
+            "querySummarySync (all) failed",
+            status_code=response.status_code,
+            response_body=response.text,
+        )
     response.raise_for_status()
     logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
     reservations = parse_query_summary_sync(response.content)

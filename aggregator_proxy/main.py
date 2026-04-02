@@ -23,8 +23,8 @@ from contextlib import asynccontextmanager
 import httpx
 import structlog
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import Response
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.nsi_client import create_nsi_client
@@ -74,6 +74,12 @@ app = FastAPI(
 
 app.include_router(reservations.router)
 app.include_router(nsi_callback_router)
+
+
+@app.exception_handler(httpx.HTTPStatusError)
+async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
+    """Return 502 when the aggregator returns an error, without logging a stacktrace."""
+    return JSONResponse(status_code=502, content={"detail": "NSI aggregator returned an error"})
 
 
 @app.get("/health", status_code=200, include_in_schema=False)

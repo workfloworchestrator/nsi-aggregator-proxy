@@ -127,6 +127,8 @@ The chart supports Ingress and Gateway API HTTPRoute for external access. See `c
 
 All configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix.
 
+Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment the variables you need and fill in the values. The file is read as UTF-8 on startup and must be in the current working directory (the directory from which you run the application). Environment variables take precedence over values in the env file.
+
 ### Required Variables
 
 | Variable | Description |

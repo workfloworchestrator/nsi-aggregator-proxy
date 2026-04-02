@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     ``AGGREGATOR_PROXY_`` prefix, e.g. ``AGGREGATOR_PROXY_HOST=0.0.0.0``.
     """
 
-    model_config = SettingsConfigDict(env_prefix="AGGREGATOR_PROXY_")
+    model_config = SettingsConfigDict(
+        env_prefix="AGGREGATOR_PROXY_",
+        env_file="aggregator_proxy.env",
+        env_file_encoding="utf-8",
+    )
 
     # Full URL of the NSI provider endpoint on the aggregator.
     provider_url: str

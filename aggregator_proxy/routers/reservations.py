@@ -502,9 +502,7 @@ async def create_reservation(
     log.info("Sending reserve request to aggregator")
 
     try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=_soap_headers("reserve")
-        )
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_soap_headers("reserve"))
         _raise_for_status(response, "reserve")
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -679,9 +677,7 @@ async def provision_reservation(
     log.info("Sending provision request to aggregator")
 
     try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=_soap_headers("provision")
-        )
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_soap_headers("provision"))
         _raise_for_status(response, "provision", connection_id=connectionId)
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -835,9 +831,7 @@ async def release_reservation(
     log.info("Sending release request to aggregator")
 
     try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=_soap_headers("release")
-        )
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_soap_headers("release"))
         _raise_for_status(response, "release", connection_id=connectionId)
     except Exception as exc:
         store.cancel_pending(correlation_id)
@@ -956,9 +950,7 @@ async def terminate_reservation(
     log.info("Sending terminate request to aggregator")
 
     try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=_soap_headers("terminate")
-        )
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=_soap_headers("terminate"))
         _raise_for_status(response, "terminate", connection_id=connectionId)
     except Exception as exc:
         store.cancel_pending(correlation_id)

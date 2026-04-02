@@ -280,10 +280,14 @@ async def _refresh_reservation(
     header = _query_header()
     soap_bytes = build_query_summary_sync(header, connection_id=connection_id)
     logger.debug("Outbound SOAP querySummarySync request", xml=soap_bytes.decode(), connection_id=connection_id)
-    response = await nsi_client.post(
-        settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
-    )
-    _raise_for_status(response, "querySummarySync", connection_id=connection_id)
+    try:
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
+        )
+        _raise_for_status(response, "querySummarySync", connection_id=connection_id)
+    except Exception as exc:
+        logger.error("Failed to refresh reservation from aggregator", connection_id=connection_id, error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
     logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
     reservations = parse_query_summary_sync(response.content)
     if not reservations:
@@ -304,10 +308,14 @@ async def _refresh_all_reservations(
     header = _query_header()
     soap_bytes = build_query_summary_sync(header)
     logger.debug("Outbound SOAP querySummarySync (all) request", xml=soap_bytes.decode())
-    response = await nsi_client.post(
-        settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
-    )
-    _raise_for_status(response, "querySummarySync")
+    try:
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
+        )
+        _raise_for_status(response, "querySummarySync")
+    except Exception as exc:
+        logger.error("Failed to refresh all reservations from aggregator", error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
     logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
     reservations = parse_query_summary_sync(response.content)
     logger.info("Aggregator returned reservations", count=len(reservations))

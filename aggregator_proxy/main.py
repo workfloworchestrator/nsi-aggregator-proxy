@@ -79,6 +79,7 @@ app.include_router(nsi_callback_router)
 @app.exception_handler(httpx.HTTPStatusError)
 async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
     """Return 502 when the aggregator returns an error, without logging a stacktrace."""
+    logger.error("Unhandled aggregator HTTP error", status_code=exc.response.status_code, url=str(exc.request.url))
     return JSONResponse(status_code=502, content={"detail": "NSI aggregator returned an error"})
 
 

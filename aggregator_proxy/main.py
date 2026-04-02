@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _refresh_all_reservations(app.state.nsi_client, app.state.reservation_store)
         logger.info("Startup query completed, reservation store populated")
     except Exception:
-        logger.exception("Failed to query aggregator on startup, starting with empty store")
+        logger.error("Failed to query aggregator on startup, starting with empty store")
     yield
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()

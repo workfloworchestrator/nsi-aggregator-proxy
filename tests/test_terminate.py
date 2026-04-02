@@ -180,6 +180,88 @@ class TestTerminateValidation:
         assert resp.status_code == 409
 
 
+class TestTerminateAggregatorFailure:
+    """Test when the aggregator is unreachable or returns errors."""
+
+    def test_aggregator_unreachable_returns_502(self, store: ReservationStore) -> None:
+        """ConnectError when sending the terminate request → 502."""
+        store.create(_make_reservation())
+        call_count = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(
+                    200,
+                    content=build_query_summary_sync_response(
+                        connection_id=CONNECTION_ID,
+                        correlation_id=cid,
+                    ),
+                )
+            # terminate call → fail
+            call_count += 1
+            raise httpx.ConnectError("connection refused")
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        app.state.callback_client = httpx.AsyncClient()
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.request("DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": CALLBACK_URL})
+        assert resp.status_code == 502
+        assert call_count == 1
+
+    def test_unexpected_sync_response_returns_502(self, store: ReservationStore) -> None:
+        """Aggregator returns a non-Acknowledgment for terminate → 502."""
+        store.create(_make_reservation())
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(
+                    200,
+                    content=build_query_summary_sync_response(
+                        connection_id=CONNECTION_ID,
+                        correlation_id=cid,
+                    ),
+                )
+            return httpx.Response(
+                200,
+                content=_make_soap("<reserveResponse><connectionId>wrong</connectionId></reserveResponse>", cid),
+            )
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        app.state.callback_client = httpx.AsyncClient()
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.request("DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": CALLBACK_URL})
+        assert resp.status_code == 502
+        assert "Unexpected" in resp.json()["detail"]
+
+    def test_refresh_unreachable_returns_502(self, store: ReservationStore) -> None:
+        """Aggregator unreachable during pre-operation refresh → 502."""
+        store.create(_make_reservation())
+
+        def failing_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(failing_handler))
+        app.state.callback_client = httpx.AsyncClient()
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.request("DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": CALLBACK_URL})
+        assert resp.status_code == 502
+
+
 class TestTerminateFromReserved:
     """Test successful terminate from RESERVED → TERMINATED."""
 

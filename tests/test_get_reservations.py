@@ -149,6 +149,23 @@ class TestGetReservation:
         assert resp.json()["globalReservationId"] is None
 
 
+class TestGetReservationAggregatorFailure:
+    """Test when the aggregator is unreachable during GET /reservations/{connectionId}."""
+
+    def test_aggregator_unreachable_returns_502(self, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+
+        def failing_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(failing_handler))
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}")
+        assert resp.status_code == 502
+
+
 class TestListReservations:
     """Tests for GET /reservations."""
 
@@ -174,3 +191,19 @@ class TestListReservations:
         assert len(body["reservations"]) == 2
         ids = {r["connectionId"] for r in body["reservations"]}
         assert ids == {CONNECTION_ID_1, CONNECTION_ID_2}
+
+
+class TestListReservationsAggregatorFailure:
+    """Test when the aggregator is unreachable during GET /reservations."""
+
+    def test_aggregator_unreachable_returns_502(self, store: ReservationStore) -> None:
+        def failing_handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(failing_handler))
+        app.state.callback_client = httpx.AsyncClient()
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/reservations")
+        assert resp.status_code == 502

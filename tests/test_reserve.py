@@ -119,6 +119,22 @@ def _reserve_timeout_xml(correlation_id: str, connection_id: str = "agg-conn-001
     )
 
 
+def _reserve_commit_failed_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
+    return _make_soap(
+        f"""\
+<reserveCommitFailed>
+  <connectionId>{connection_id}</connectionId>
+  <serviceException>
+    <nsaId>urn:ogf:network:child:2025:nsa</nsaId>
+    <connectionId>{connection_id}</connectionId>
+    <errorId>00999</errorId>
+    <text>COMMIT_FAILED</text>
+  </serviceException>
+</reserveCommitFailed>""",
+        correlation_id,
+    )
+
+
 def _acknowledgment_xml(correlation_id: str) -> bytes:
     return _make_soap("<acknowledgment/>", correlation_id)
 
@@ -425,6 +441,162 @@ class TestReserveNsiTimeout:
                     reservation = store.get("agg-conn-001")
                     assert reservation is not None
                     assert reservation.status == ReservationStatus.FAILED
+
+
+class TestReserveCommitFailed:
+    """Test reserveCommitFailed callback → FAILED."""
+
+    @pytest.mark.anyio()
+    async def test_reserve_commit_failed(self, store: ReservationStore) -> None:
+        def nsi_handler(request: httpx.Request) -> httpx.Response:
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+            if "reserveCommit" in body:
+                return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=_reserve_response_xml(cid))
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(nsi_handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+                    resp = await test_client.post("/reservations", json=_reserve_request_body())
+                    assert resp.status_code == 202
+
+                    await asyncio.sleep(0.05)
+                    cid = _get_pending_correlation_id(store)
+
+                    # Simulate reserveConfirmed callback
+                    await test_client.post("/nsi/v2/callback", content=_reserve_confirmed_xml(cid))
+                    await asyncio.sleep(0.05)
+
+                    # Get commit correlation_id
+                    commit_cid = _get_pending_correlation_id(store)
+
+                    # Simulate reserveCommitFailed callback
+                    await test_client.post(
+                        "/nsi/v2/callback",
+                        content=_reserve_commit_failed_xml(commit_cid),
+                    )
+                    await asyncio.sleep(0.1)
+
+                    reservation = store.get("agg-conn-001")
+                    assert reservation is not None
+                    assert reservation.status == ReservationStatus.FAILED
+                    assert reservation.last_error is not None
+                    assert "reserveCommitFailed" in reservation.last_error
+
+
+class TestReserveCommitAggregatorUnreachable:
+    """Test aggregator unreachable when sending reserveCommit → FAILED."""
+
+    @pytest.mark.anyio()
+    async def test_reserve_commit_aggregator_unreachable(self, store: ReservationStore) -> None:
+        commit_should_fail = False
+
+        def nsi_handler(request: httpx.Request) -> httpx.Response:
+            if commit_should_fail:
+                raise httpx.ConnectError("connection refused")
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+            return httpx.Response(200, content=_reserve_response_xml(cid))
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(nsi_handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+                    resp = await test_client.post("/reservations", json=_reserve_request_body())
+                    assert resp.status_code == 202
+
+                    await asyncio.sleep(0.05)
+                    cid = _get_pending_correlation_id(store)
+
+                    # Make subsequent NSI calls fail
+                    commit_should_fail = True
+
+                    # Simulate reserveConfirmed callback → triggers reserveCommit which will fail
+                    await test_client.post("/nsi/v2/callback", content=_reserve_confirmed_xml(cid))
+                    await asyncio.sleep(0.1)
+
+                    reservation = store.get("agg-conn-001")
+                    assert reservation is not None
+                    assert reservation.status == ReservationStatus.FAILED
+                    assert reservation.last_error is not None
+                    assert "failed to send reserveCommit" in reservation.last_error
+
+
+class TestReserveCommitTimeout:
+    """Test no reserveCommitConfirmed received → FAILED."""
+
+    @pytest.mark.anyio()
+    async def test_reserve_commit_timeout(self, store: ReservationStore, monkeypatch: pytest.MonkeyPatch) -> None:
+        from aggregator_proxy import settings as settings_module
+
+        monkeypatch.setattr(settings_module.settings, "nsi_timeout", 0.1)
+
+        def nsi_handler(request: httpx.Request) -> httpx.Response:
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+            if "reserveCommit" in body:
+                return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=_reserve_response_xml(cid))
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(nsi_handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+                    resp = await test_client.post("/reservations", json=_reserve_request_body())
+                    assert resp.status_code == 202
+
+                    await asyncio.sleep(0.05)
+                    cid = _get_pending_correlation_id(store)
+
+                    # Simulate reserveConfirmed → triggers reserveCommit
+                    await test_client.post("/nsi/v2/callback", content=_reserve_confirmed_xml(cid))
+
+                    # Wait for commit timeout (don't send reserveCommitConfirmed)
+                    await asyncio.sleep(0.3)
+
+                    reservation = store.get("agg-conn-001")
+                    assert reservation is not None
+                    assert reservation.status == ReservationStatus.FAILED
+                    assert reservation.last_error is not None
+                    assert "no reserveCommitConfirmed" in reservation.last_error
 
 
 class TestReserveWithGlobalReservationId:

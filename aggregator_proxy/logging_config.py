@@ -57,7 +57,6 @@ def configure_logging() -> None:
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
 

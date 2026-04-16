@@ -10,7 +10,7 @@ This software is being developed by the
 [Advanced North-Atlantic Consortium](https://www.anaeng.global/), 
 a cooperation between National Education and Research Networks (NRENs) and 
 research partners to provide network connectivity for research and education 
-across the North-Atlantic, as part of the ANA-GRAM project. 
+across the North-Atlantic, as part of the ANA-GRAM (ANA Global Resource Aggregation Method) project. 
 
 The goal of the ANA-GRAM project is to federate the ANA trans-Atlantic links through
 [Network Service Interface (NSI)](https://ogf.org/documents/GFD.237.pdf)-based automation.

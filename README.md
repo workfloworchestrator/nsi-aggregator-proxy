@@ -177,6 +177,7 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 | `AGGREGATOR_PROXY_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `AGGREGATOR_PROXY_HOST` | `0.0.0.0` | Bind host |
 | `AGGREGATOR_PROXY_PORT` | `8080` | Bind port |
+| `AGGREGATOR_PROXY_ROOT_PATH` | _(empty)_ | ASGI root path prefix. Set when serving behind a reverse proxy that strips a path prefix (e.g. `/aggregator-proxy`). Ensures Swagger UI loads the OpenAPI spec from the correct URL. Does not affect route matching. |
 
 ## API Endpoints
 

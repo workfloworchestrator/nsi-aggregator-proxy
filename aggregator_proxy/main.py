@@ -70,6 +70,7 @@ app = FastAPI(
     description=("REST proxy exposing a simplified connection state-machine on top of an NSI aggregator."),
     version=APP_VERSION,
     lifespan=lifespan,
+    root_path=settings.root_path,
 )
 
 app.include_router(reservations.router)

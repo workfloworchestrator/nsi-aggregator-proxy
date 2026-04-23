@@ -118,6 +118,7 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `AGGREGATOR_PROXY_LOG_LEVEL` | No | `INFO` | Log level |
 | `AGGREGATOR_PROXY_HOST` | No | `0.0.0.0` | Bind host |
 | `AGGREGATOR_PROXY_PORT` | No | `8080` | Bind port |
+| `AGGREGATOR_PROXY_ROOT_PATH` | No | _(empty)_ | ASGI root path prefix for reverse proxy with path stripping |
 
 ### Code style
 

@@ -20,7 +20,6 @@ Swagger UI can find the OpenAPI spec when served behind a reverse proxy
 with a path prefix (e.g. /aggregator-proxy).
 """
 
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

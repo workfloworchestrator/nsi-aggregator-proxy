@@ -57,6 +57,14 @@ class ReservationStatus(StrEnum):
     TERMINATED = "TERMINATED"
 
 
+class DetailLevel(StrEnum):
+    """Level of detail for reservation queries."""
+
+    SUMMARY = "summary"
+    FULL = "full"
+    RECURSIVE = "recursive"
+
+
 # ---------------------------------------------------------------------------
 # Shared sub-models
 # ---------------------------------------------------------------------------
@@ -142,6 +150,19 @@ class CallbackRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class PathSegment(BaseModel):
+    """A single path segment (child connection) in the reservation's path."""
+
+    order: int
+    connectionId: str
+    providerNSA: str
+    serviceType: str | None = None
+    capacity: int | None = None
+    sourceSTP: str | None = None
+    destSTP: str | None = None
+    status: ReservationStatus | None = None
+
+
 class ReservationDetail(BaseModel):
     """Full reservation detail as returned by GET /reservations/{connectionId}."""
 
@@ -151,6 +172,7 @@ class ReservationDetail(BaseModel):
     criteria: CriteriaResponse | None = None
     status: ReservationStatus
     lastError: str | None = None
+    segments: list[PathSegment] | None = None
 
 
 class ReservationsListResponse(BaseModel):

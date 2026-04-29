@@ -67,9 +67,11 @@ aggregator_proxy/
     namespaces.py       # Shared NSMAP dict for all NSI CS v2 XML namespaces
     builder.py          # NsiHeader dataclass + build_reserve / build_reserve_commit /
                         #   build_provision / build_release / build_terminate /
-                        #   build_query_summary_sync / build_query_notification_sync (lxml)
+                        #   build_query_summary_sync / build_query_notification_sync /
+                        #   build_query_recursive (lxml)
     parser.py           # parse() dispatcher → typed dataclasses for every inbound
-                        #   message type; see module docstring for sync vs async classification
+                        #   message type; includes ChildSegment (path segment data) and
+                        #   QueryRecursiveResult; see module docstring for classification
 ```
 
 ### NSI SOAP layer
@@ -93,12 +95,15 @@ The `nsi_soap` package handles the translation between the REST layer and the NS
 | `DataPlaneStateChange` | Async callback | `active=True` → ACTIVATED, `active=False` → RESERVED |
 | `ReleaseConfirmed` | Async callback | State → RESERVED |
 | `TerminateConfirmed` | Async callback | State → TERMINATED |
+| `QueryRecursiveResult` | Async callback | Response to `queryRecursive`; carries `list[QueryReservation]` with `ChildSegment` children including per-segment `ConnectionStates` |
 
 ### Current implementation status
 
 `POST /reservations`, `POST /reservations/{connectionId}/provision`, `POST /reservations/{connectionId}/release`, and `DELETE /reservations/{connectionId}` (terminate) are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. Release sends the NSI release request, waits for `releaseConfirmed`, then waits for `DataPlaneStateChange(active=False)` to transition back to RESERVED. Terminate sends the NSI terminate request, waits for `terminateConfirmed`, and transitions to TERMINATED (both success and timeout result in TERMINATED per the state machine).
 
 **Aggregator state refresh**: Before every operation (except `POST /reservations` which creates a new reservation), the proxy queries the aggregator via `querySummarySync` and maps the NSI sub-state machines to the proxy state, then also calls `queryNotificationSync` to detect error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) that are not visible in the sub-state machines. This ensures the proxy's state reflects changes made outside the proxy (e.g. PassedEndTime, other NSI clients, error events). On startup, a full `querySummarySync` populates the store. The `requesterNSA` for query requests comes from `settings.requester_nsa`; for operation requests (reserve, commit, provision, release, terminate) it comes from the user-supplied `requesterNSA`. The `providerNSA` from `POST /reservations` is validated against `settings.provider_nsa` and rejected with 400 if they don't match.
+
+**Detail query parameter**: `GET /reservations/{connectionId}` and `GET /reservations` accept a `detail` query parameter (`summary`, `full`, `recursive`) that controls path segment visibility. At `summary` (default) no segment data is returned. At `full`, the `querySummarySync` response's `<children>` elements are parsed into `segments[]` (order, connectionId, providerNSA, STPs, capacity) at no extra cost. At `recursive`, an async `queryRecursive` round-trip to the aggregator returns per-segment connection states mapped to proxy `status`. `detail=recursive` is rejected with 400 on the list endpoint because the async fan-out per reservation is too expensive. Segment data is transient (computed per request, not stored).
 
 The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-state machines to proxy states in priority order: Terminated/PassedEndTime → TERMINATED, Failed lifecycle → FAILED, ReserveTimeout/ReserveFailed/ReserveAborting → FAILED, has_error_event → FAILED, ReserveChecking/ReserveHeld/ReserveCommitting → RESERVING, Released + active → DEACTIVATING, dataPlane active → ACTIVATED, Provisioned → ACTIVATING, otherwise → RESERVED.
 

@@ -24,9 +24,11 @@ from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
 from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from tests.conftest import (
+    build_child_xml,
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
     build_query_summary_sync_response,
+    build_query_summary_sync_response_with_children,
 )
 
 CONNECTION_ID_1 = "conn-001"
@@ -207,3 +209,150 @@ class TestListReservationsAggregatorFailure:
 
         resp = client.get("/reservations")
         assert resp.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# Detail query parameter tests
+# ---------------------------------------------------------------------------
+
+_CHILDREN_XML = build_child_xml(
+    order=0,
+    connection_id="child-seg-0",
+    provider_nsa="urn:ogf:network:west.example.net:2025:nsa:supa",
+    source_stp="urn:ogf:network:west.example.net:2025:port-a?vlan=100",
+    dest_stp="urn:ogf:network:west.example.net:2025:port-b?vlan=200",
+    capacity=1000,
+) + build_child_xml(
+    order=1,
+    connection_id="child-seg-1",
+    provider_nsa="urn:ogf:network:east.example.net:2025:nsa:supa",
+    source_stp="urn:ogf:network:east.example.net:2025:port-c?vlan=200",
+    dest_stp="urn:ogf:network:east.example.net:2025:port-d?vlan=300",
+    capacity=1000,
+)
+
+
+def _nsi_handler_with_children(connection_id: str) -> object:
+    """Return an NSI handler that returns querySummarySyncConfirmed with children."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cid = parse_correlation_id(request.content)
+        body = request.content.decode()
+        if "queryNotificationSync" in body:
+            return httpx.Response(200, content=build_query_notification_sync_response(cid))
+        return httpx.Response(
+            200,
+            content=build_query_summary_sync_response_with_children(
+                connection_id=connection_id,
+                correlation_id=cid,
+                children_xml=_CHILDREN_XML,
+            ),
+        )
+
+    return handler
+
+
+class TestGetReservationDetailParameter:
+    """Tests for the detail query parameter on GET /reservations/{connectionId}."""
+
+    def test_default_detail_has_no_segments(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_reservation(CONNECTION_ID_1))
+        )
+
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}")
+        assert resp.status_code == 200
+        assert resp.json()["segments"] is None
+
+    def test_detail_summary_has_no_segments(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_reservation(CONNECTION_ID_1))
+        )
+
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}?detail=summary")
+        assert resp.status_code == 200
+        assert resp.json()["segments"] is None
+
+    def test_detail_full_returns_segments(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_children(CONNECTION_ID_1))
+        )
+
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}?detail=full")
+        assert resp.status_code == 200
+        body = resp.json()
+        segments = body["segments"]
+        assert segments is not None
+        assert len(segments) == 2
+
+        assert segments[0]["order"] == 0
+        assert segments[0]["connectionId"] == "child-seg-0"
+        assert segments[0]["providerNSA"] == "urn:ogf:network:west.example.net:2025:nsa:supa"
+        assert segments[0]["capacity"] == 1000
+        assert segments[0]["sourceSTP"] == "urn:ogf:network:west.example.net:2025:port-a?vlan=100"
+        assert segments[0]["destSTP"] == "urn:ogf:network:west.example.net:2025:port-b?vlan=200"
+        assert segments[0]["status"] is None
+
+        assert segments[1]["order"] == 1
+        assert segments[1]["connectionId"] == "child-seg-1"
+
+    def test_detail_full_no_children_returns_no_segments(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+        app.state.nsi_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_nsi_handler_with_reservation(CONNECTION_ID_1))
+        )
+
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}?detail=full")
+        assert resp.status_code == 200
+        assert resp.json()["segments"] is None
+
+    def test_invalid_detail_returns_422(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+        resp = client.get(f"/reservations/{CONNECTION_ID_1}?detail=invalid")
+        assert resp.status_code == 422
+
+
+class TestListReservationsDetailParameter:
+    """Tests for the detail query parameter on GET /reservations."""
+
+    def test_detail_recursive_returns_400(self, client: TestClient) -> None:
+        resp = client.get("/reservations?detail=recursive")
+        assert resp.status_code == 400
+        assert "recursive" in resp.json()["detail"].lower()
+
+    def test_detail_full_returns_segments(self, client: TestClient, store: ReservationStore) -> None:
+        store.create(_make_reservation())
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            return httpx.Response(
+                200,
+                content=build_query_summary_sync_response_with_children(
+                    connection_id=CONNECTION_ID_1,
+                    correlation_id=cid,
+                    children_xml=_CHILDREN_XML,
+                ),
+            )
+
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        resp = client.get("/reservations?detail=full")
+        assert resp.status_code == 200
+        reservations = resp.json()["reservations"]
+        assert len(reservations) == 1
+        segments = reservations[0]["segments"]
+        assert segments is not None
+        assert len(segments) == 2
+        assert segments[0]["connectionId"] == "child-seg-0"
+
+    def test_default_detail_has_no_segments(self, client: TestClient) -> None:
+        resp = client.get("/reservations")
+        assert resp.status_code == 200
+        for r in resp.json()["reservations"]:
+            assert r["segments"] is None

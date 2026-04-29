@@ -24,6 +24,7 @@ from aggregator_proxy.nsi_soap.builder import (
     NsiHeader,
     build_provision,
     build_query_notification_sync,
+    build_query_recursive,
     build_query_summary_sync,
     build_release,
     build_reserve,
@@ -99,6 +100,8 @@ def nsi_schema() -> etree.XMLSchema:
         pytest.param(build_query_summary_sync(_HEADER, connection_id="conn-42"), id="query_summary_sync_with_id"),
         pytest.param(build_query_summary_sync(_HEADER), id="query_summary_sync_all"),
         pytest.param(build_query_notification_sync(_HEADER, "conn-42"), id="query_notification_sync"),
+        pytest.param(build_query_recursive(_HEADER, connection_id="conn-42"), id="query_recursive_with_id"),
+        pytest.param(build_query_recursive(_HEADER), id="query_recursive_all"),
     ],
 )
 def test_message_validates_against_schema(nsi_schema: etree.XMLSchema, xml_bytes: bytes) -> None:

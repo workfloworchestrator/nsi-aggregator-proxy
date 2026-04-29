@@ -346,6 +346,12 @@ stateDiagram-v2
 
 Get the details of a single reservation. Before returning, the proxy queries the aggregator via `querySummarySync` and `queryNotificationSync` to ensure the state is up to date.
 
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `detail` | string | `summary` | Level of path segment detail: `summary` (no segments), `full` (segments from `querySummarySync`), or `recursive` (segments with per-segment status via async `queryRecursive`) |
+
 #### Response
 
 ```json
@@ -363,7 +369,19 @@ Get the details of a single reservation. Before returning, the proxy queries the
     }
   },
   "status": "ACTIVATED",
-  "lastError": null
+  "lastError": null,
+  "segments": [
+    {
+      "order": 0,
+      "connectionId": "child-seg-0",
+      "providerNSA": "urn:ogf:network:west.example.net:2025:nsa:supa",
+      "serviceType": "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+      "capacity": 1000,
+      "sourceSTP": "urn:ogf:network:west.example.net:2025:port-a?vlan=100",
+      "destSTP": "urn:ogf:network:west.example.net:2025:port-b?vlan=200",
+      "status": "ACTIVATED"
+    }
+  ]
 }
 ```
 
@@ -375,10 +393,17 @@ Get the details of a single reservation. Before returning, the proxy queries the
 | `criteria` | object or null | Reservation criteria including version, service type, and point-to-point parameters |
 | `status` | string | Current state: `RESERVING`, `RESERVED`, `ACTIVATING`, `ACTIVATED`, `DEACTIVATING`, `FAILED`, or `TERMINATED` |
 | `lastError` | string or null | Human-readable description of the most recent error, if any |
+| `segments` | array or null | Path segments (child connections); only present when `detail=full` or `detail=recursive`. Each segment has `order`, `connectionId`, `providerNSA`, `serviceType`, `capacity`, `sourceSTP`, `destSTP`, and `status` (only with `detail=recursive`). |
 
 ### GET /reservations
 
 List all reservations. The proxy queries the aggregator to refresh all reservation states before returning.
+
+#### Query Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `detail` | string | `summary` | Level of path segment detail: `summary` (no segments) or `full` (segments from `querySummarySync`). `recursive` is not supported on the list endpoint and returns 400. |
 
 #### Response
 
@@ -399,7 +424,8 @@ List all reservations. The proxy queries the aggregator to refresh all reservati
         }
       },
       "status": "ACTIVATED",
-      "lastError": null
+      "lastError": null,
+      "segments": null
     }
   ]
 }
@@ -504,7 +530,8 @@ When an operation completes (or fails), the proxy sends a POST request to the `c
     }
   },
   "status": "RESERVED",
-  "lastError": null
+  "lastError": null,
+  "segments": null
 }
 ```
 

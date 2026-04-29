@@ -29,6 +29,7 @@ from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from tests.conftest import (
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
+    build_query_recursive_confirmed_response,
     build_query_summary_sync_response,
 )
 
@@ -86,6 +87,20 @@ def _make_reservation(status: ReservationStatus = ReservationStatus.RESERVED) ->
 
 
 RequestRecorder = Callable[[httpx.Request], None]
+
+
+async def _wait_for_captured(
+    captured: list[httpx.Request],
+    predicate: Callable[[httpx.Request], bool],
+    *,
+    polls: int = 200,
+    interval: float = 0.01,
+) -> None:
+    """Poll ``captured`` until at least one request matches ``predicate``."""
+    for _ in range(polls):
+        if any(predicate(r) for r in captured):
+            return
+        await asyncio.sleep(interval)
 
 
 def _recording_handler(
@@ -333,3 +348,59 @@ class TestTerminateSoapAction:
         terminate_requests = [r for r in captured if b"terminate>" in r.content and b"querySummary" not in r.content]
         assert len(terminate_requests) >= 1
         assert terminate_requests[0].headers["SOAPAction"] == f'"{_SOAP_ACTION_BASE}/terminate"'
+
+
+class TestQueryRecursiveSoapAction:
+    """Verify SOAPAction on the queryRecursive request."""
+
+    @pytest.mark.anyio()
+    async def test_query_recursive_sends_correct_soap_action(self) -> None:
+        captured: list[httpx.Request] = []
+        store = ReservationStore()
+        store.create(_make_reservation())
+
+        def nsi_response(request: httpx.Request) -> httpx.Response:
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            # queryRecursive — return acknowledgment
+            return httpx.Response(200, content=_acknowledgment_xml(cid))
+
+        handler = _recording_handler(captured, nsi_response)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+
+                    def _is_query_recursive(r: httpx.Request) -> bool:
+                        return b"queryRecursive" in r.content and b"querySummary" not in r.content
+
+                    async def deliver_callback() -> None:
+                        await _wait_for_captured(captured, _is_query_recursive)
+                        qr_req = next(filter(_is_query_recursive, captured))
+                        cid = parse_correlation_id(qr_req.content)
+                        callback_xml = build_query_recursive_confirmed_response(
+                            connection_id=CONNECTION_ID, correlation_id=cid, children_xml=""
+                        )
+                        await test_client.post(
+                            "/nsi/v2/callback",
+                            content=callback_xml,
+                            headers={"Content-Type": "text/xml"},
+                        )
+
+                    callback_task = asyncio.create_task(deliver_callback())
+                    resp = await test_client.get(f"/reservations/{CONNECTION_ID}?detail=recursive")
+                    await callback_task
+
+                    assert resp.status_code == 200
+
+        qr_requests = [r for r in captured if b"queryRecursive" in r.content and b"querySummary" not in r.content]
+        assert len(qr_requests) >= 1
+        assert qr_requests[0].headers["SOAPAction"] == f'"{_SOAP_ACTION_BASE}/queryRecursive"'

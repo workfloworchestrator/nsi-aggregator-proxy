@@ -23,7 +23,7 @@ from uuid import uuid4
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
 from aggregator_proxy.dependencies import get_callback_client, get_nsi_client, get_reservation_store
@@ -32,6 +32,8 @@ from aggregator_proxy.models import (
     AcceptedResponse,
     CallbackRequest,
     CriteriaResponse,
+    DetailLevel,
+    PathSegment,
     ReservationDetail,
     ReservationRequest,
     ReservationsListResponse,
@@ -39,11 +41,13 @@ from aggregator_proxy.models import (
 )
 from aggregator_proxy.nsi_soap import (
     Acknowledgment,
+    ChildSegment,
     DataPlaneStateChange,
     ErrorEvent,
     NsiHeader,
     NsiMessage,
     ProvisionConfirmed,
+    QueryRecursiveResult,
     QueryReservation,
     ReleaseConfirmed,
     ReserveCommitConfirmed,
@@ -57,6 +61,7 @@ from aggregator_proxy.nsi_soap import (
     Variable,
     build_provision,
     build_query_notification_sync,
+    build_query_recursive,
     build_query_summary_sync,
     build_release,
     build_reserve,
@@ -76,6 +81,7 @@ logger = structlog.get_logger(__name__)
 NsiClient = Annotated[httpx.AsyncClient, Depends(get_nsi_client)]
 CallbackClient = Annotated[httpx.AsyncClient, Depends(get_callback_client)]
 Store = Annotated[ReservationStore, Depends(get_reservation_store)]
+DetailParam = Annotated[DetailLevel, Query(description="Level of path segment detail")]
 
 ACCEPTED_TYPE = "https://github.com/workfloworchestrator/nsi-aggregator-proxy#202-accepted"
 _SOAP_ACTION_BASE = "http://schemas.ogf.org/nsi/2013/12/connection/service"
@@ -238,6 +244,25 @@ def _update_store_from_query(
     return reservation
 
 
+def _map_children_to_segments(children: list[ChildSegment] | None) -> list[PathSegment] | None:
+    """Map parsed child segments to response PathSegment models."""
+    if not children:
+        return None
+    return [
+        PathSegment(
+            order=child.order,
+            connectionId=child.connection_id,
+            providerNSA=child.provider_nsa,
+            serviceType=child.service_type,
+            capacity=child.capacity,
+            sourceSTP=child.source_stp,
+            destSTP=child.dest_stp,
+            status=map_nsi_states_to_status(child.connection_states) if child.connection_states is not None else None,
+        )
+        for child in children
+    ]
+
+
 async def _query_error_events(
     nsi_client: httpx.AsyncClient,
     connection_id: str,
@@ -275,7 +300,7 @@ async def _refresh_reservation(
     connection_id: str,
     nsi_client: httpx.AsyncClient,
     store: ReservationStore,
-) -> Reservation | None:
+) -> tuple[Reservation | None, QueryReservation | None]:
     """Query the aggregator for a single reservation and update the store."""
     header = _query_header()
     soap_bytes = build_query_summary_sync(header, connection_id=connection_id)
@@ -289,20 +314,81 @@ async def _refresh_reservation(
         logger.error("Failed to refresh reservation from aggregator", connection_id=connection_id, error=str(exc))
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
     logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
-    reservations = parse_query_summary_sync(response.content)
-    if not reservations:
+    query_reservations = parse_query_summary_sync(response.content)
+    if not query_reservations:
         logger.info("Reservation not found on aggregator", connection_id=connection_id)
-        return None
-    error_events = await _query_error_events(nsi_client, connection_id)
-    reservation = _update_store_from_query(store, reservations[0], error_events)
-    logger.info("Reservation state refreshed from aggregator", connection_id=connection_id, status=reservation.status)
-    return reservation
+        return None, None
+    return await _finalize_refresh(query_reservations[0], nsi_client, store)
+
+
+async def _finalize_refresh(
+    qr: QueryReservation,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> tuple[Reservation, QueryReservation]:
+    """Query error events, update the store, and return the refreshed reservation."""
+    error_events = await _query_error_events(nsi_client, qr.connection_id)
+    reservation = _update_store_from_query(store, qr, error_events)
+    logger.info(
+        "Reservation state refreshed from aggregator", connection_id=qr.connection_id, status=reservation.status
+    )
+    return reservation, qr
+
+
+async def _refresh_reservation_recursive(
+    connection_id: str,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> tuple[Reservation | None, QueryReservation | None]:
+    """Query the aggregator recursively for a single reservation with per-segment states."""
+    header = _query_header()
+    correlation_id = header.correlation_id
+    future = store.register_pending(correlation_id)
+
+    soap_bytes = build_query_recursive(header, connection_id=connection_id)
+    logger.debug("Outbound SOAP queryRecursive request", xml=soap_bytes.decode(), connection_id=connection_id)
+    try:
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("queryRecursive")
+        )
+        _raise_for_status(response, "queryRecursive", connection_id=connection_id)
+    except Exception as exc:
+        store.cancel_pending(correlation_id)
+        logger.error("Failed to send queryRecursive to aggregator", connection_id=connection_id, error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+
+    logger.debug("Inbound SOAP queryRecursive acknowledgment", xml=response.text, connection_id=connection_id)
+
+    sync_msg = parse(response.content)
+    if not isinstance(sync_msg, Acknowledgment):
+        store.cancel_pending(correlation_id)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+        )
+
+    try:
+        result = await asyncio.wait_for(future, timeout=settings.nsi_timeout)
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="queryRecursive timed out waiting for aggregator callback") from exc
+
+    match result:
+        case QueryRecursiveResult(reservations=query_reservations):
+            if not query_reservations:
+                logger.info("Reservation not found on aggregator (recursive)", connection_id=connection_id)
+                return None, None
+            return await _finalize_refresh(query_reservations[0], nsi_client, store)
+        case _:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unexpected callback from aggregator: {type(result).__name__}",
+            )
 
 
 async def _refresh_all_reservations(
     nsi_client: httpx.AsyncClient,
     store: ReservationStore,
-) -> None:
+) -> list[QueryReservation]:
     """Query the aggregator for all reservations and update the store."""
     logger.info("Refreshing all reservations from aggregator")
     header = _query_header()
@@ -317,13 +403,13 @@ async def _refresh_all_reservations(
         logger.error("Failed to refresh all reservations from aggregator", error=str(exc))
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
     logger.debug("Inbound SOAP querySummarySyncConfirmed (all) response", xml=response.text)
-    reservations = parse_query_summary_sync(response.content)
-    logger.info("Aggregator returned reservations", count=len(reservations))
+    query_reservations = parse_query_summary_sync(response.content)
+    logger.info("Aggregator returned reservations", count=len(query_reservations))
 
     # For reservations not already in a terminal/failed state, query error events concurrently
     needs_notification: list[QueryReservation] = []
     terminal_reservations: list[QueryReservation] = []
-    for qr in reservations:
+    for qr in query_reservations:
         preliminary_status = map_nsi_states_to_status(qr.connection_states)
         if preliminary_status in (ReservationStatus.TERMINATED, ReservationStatus.FAILED):
             terminal_reservations.append(qr)
@@ -340,6 +426,8 @@ async def _refresh_all_reservations(
         )
         for qr, error_events in zip(needs_notification, error_results, strict=True):
             _update_store_from_query(store, qr, error_events)
+
+    return query_reservations
 
 
 async def _complete_reserve(
@@ -660,7 +748,7 @@ async def provision_reservation(
     log.info("Provision request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = await _refresh_reservation(connectionId, nsi_client, store)
+    reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status != ReservationStatus.RESERVED:
@@ -814,7 +902,7 @@ async def release_reservation(
     log.info("Release request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = await _refresh_reservation(connectionId, nsi_client, store)
+    reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status != ReservationStatus.ACTIVATED:
@@ -933,7 +1021,7 @@ async def terminate_reservation(
     log.info("Terminate request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation = await _refresh_reservation(connectionId, nsi_client, store)
+    reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
     if reservation.status not in (ReservationStatus.RESERVED, ReservationStatus.FAILED):
@@ -987,6 +1075,22 @@ async def terminate_reservation(
     )
 
 
+def _build_reservation_detail(
+    reservation: Reservation,
+    segments: list[PathSegment] | None = None,
+) -> ReservationDetail:
+    """Build a ReservationDetail response from a stored reservation."""
+    return ReservationDetail(
+        globalReservationId=reservation.global_reservation_id,
+        connectionId=reservation.connection_id,
+        description=reservation.description,
+        criteria=reservation.criteria,
+        status=reservation.status,
+        lastError=reservation.last_error,
+        segments=segments,
+    )
+
+
 @router.get(
     "/{connectionId}",
     response_model=ReservationDetail,
@@ -996,20 +1100,22 @@ async def get_reservation(
     connectionId: str,
     nsi_client: NsiClient,
     store: Store,
+    detail: DetailParam = DetailLevel.SUMMARY,
 ) -> ReservationDetail:
     """Return the details of the reservation identified by ``connectionId``."""
-    logger.debug("Get reservation request", connection_id=connectionId)
-    reservation = await _refresh_reservation(connectionId, nsi_client, store)
+    logger.debug("Get reservation request", connection_id=connectionId, detail=detail)
+
+    match detail:
+        case DetailLevel.RECURSIVE:
+            reservation, qr = await _refresh_reservation_recursive(connectionId, nsi_client, store)
+        case _:
+            reservation, qr = await _refresh_reservation(connectionId, nsi_client, store)
+
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
-    return ReservationDetail(
-        globalReservationId=reservation.global_reservation_id,
-        connectionId=reservation.connection_id,
-        description=reservation.description,
-        criteria=reservation.criteria,
-        status=reservation.status,
-        lastError=reservation.last_error,
-    )
+
+    segments = _map_children_to_segments(qr.children) if qr is not None and detail != DetailLevel.SUMMARY else None
+    return _build_reservation_detail(reservation, segments)
 
 
 @router.get(
@@ -1020,20 +1126,25 @@ async def get_reservation(
 async def list_reservations(
     nsi_client: NsiClient,
     store: Store,
+    detail: DetailParam = DetailLevel.SUMMARY,
 ) -> ReservationsListResponse:
     """Return a list of all reservations and their details."""
-    logger.debug("List all reservations request")
-    await _refresh_all_reservations(nsi_client, store)
-    return ReservationsListResponse(
-        reservations=[
-            ReservationDetail(
-                globalReservationId=r.global_reservation_id,
-                connectionId=r.connection_id,
-                description=r.description,
-                criteria=r.criteria,
-                status=r.status,
-                lastError=r.last_error,
-            )
-            for r in store.get_all()
-        ]
-    )
+    if detail == DetailLevel.RECURSIVE:
+        raise HTTPException(
+            status_code=400,
+            detail="detail=recursive is only supported for individual reservations",
+        )
+
+    logger.debug("List all reservations request", detail=detail)
+    query_reservations = await _refresh_all_reservations(nsi_client, store)
+
+    if detail == DetailLevel.FULL:
+        children_by_id = {qr.connection_id: qr.children for qr in query_reservations}
+        return ReservationsListResponse(
+            reservations=[
+                _build_reservation_detail(r, _map_children_to_segments(children_by_id.get(r.connection_id)))
+                for r in store.get_all()
+            ]
+        )
+
+    return ReservationsListResponse(reservations=[_build_reservation_detail(r) for r in store.get_all()])

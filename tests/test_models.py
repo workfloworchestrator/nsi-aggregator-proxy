@@ -18,7 +18,15 @@
 import pytest
 from pydantic import ValidationError
 
-from aggregator_proxy.models import P2PS, Criteria, ReservationRequest
+from aggregator_proxy.models import (
+    P2PS,
+    Criteria,
+    DetailLevel,
+    PathSegment,
+    ReservationDetail,
+    ReservationRequest,
+    ReservationStatus,
+)
 
 
 @pytest.mark.parametrize(
@@ -173,3 +181,72 @@ def test_uppercase_uuid_accepted() -> None:
         callbackURL="http://callback.example.com",  # type: ignore[arg-type]
     )
     assert req.globalReservationId is not None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param("summary", DetailLevel.SUMMARY, id="summary"),
+        pytest.param("full", DetailLevel.FULL, id="full"),
+        pytest.param("recursive", DetailLevel.RECURSIVE, id="recursive"),
+    ],
+)
+def test_detail_level_values(value: str, expected: DetailLevel) -> None:
+    assert DetailLevel(value) == expected
+
+
+def test_path_segment_without_status() -> None:
+    segment = PathSegment(
+        order=0,
+        connectionId="child-1",
+        providerNSA="urn:ogf:network:example.net:2025:nsa:supa",
+        capacity=1000,
+        sourceSTP="urn:ogf:network:example.net:2025:port-a?vlan=100",
+        destSTP="urn:ogf:network:example.net:2025:port-b?vlan=200",
+    )
+    data = segment.model_dump()
+    assert data["status"] is None
+    assert data["order"] == 0
+    assert data["connectionId"] == "child-1"
+
+
+def test_path_segment_with_status() -> None:
+    segment = PathSegment(
+        order=1,
+        connectionId="child-2",
+        providerNSA="urn:ogf:network:example.net:2025:nsa:supa",
+        status=ReservationStatus.ACTIVATED,
+    )
+    data = segment.model_dump()
+    assert data["status"] == "ACTIVATED"
+
+
+def test_reservation_detail_with_segments() -> None:
+    detail = ReservationDetail(
+        connectionId="conn-1",
+        description="test",
+        status=ReservationStatus.ACTIVATED,
+        segments=[
+            PathSegment(
+                order=0,
+                connectionId="child-1",
+                providerNSA="urn:ogf:network:example.net:2025:nsa:supa",
+                capacity=1000,
+                status=ReservationStatus.ACTIVATED,
+            ),
+        ],
+    )
+    data = detail.model_dump()
+    assert data["segments"] is not None
+    assert len(data["segments"]) == 1
+    assert data["segments"][0]["connectionId"] == "child-1"
+
+
+def test_reservation_detail_without_segments() -> None:
+    detail = ReservationDetail(
+        connectionId="conn-1",
+        description="test",
+        status=ReservationStatus.RESERVED,
+    )
+    data = detail.model_dump()
+    assert data["segments"] is None

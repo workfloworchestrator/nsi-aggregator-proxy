@@ -20,6 +20,7 @@ from lxml import etree
 from aggregator_proxy.nsi_soap import (
     NsiHeader,
     build_provision,
+    build_query_recursive,
     build_query_summary_sync,
     build_release,
     build_reserve,
@@ -228,3 +229,31 @@ class TestBuildQuerySummarySync:
     def test_xml_declaration_present(self) -> None:
         xml = build_query_summary_sync(_header())
         assert xml.startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
+
+
+class TestBuildQueryRecursive:
+    def test_with_connection_id(self) -> None:
+        xml = build_query_recursive(_header(), connection_id="conn-42")
+        root = _parse_envelope(xml)
+        op = _get_body_operation(root)
+        assert etree.QName(op.tag).localname == "queryRecursive"
+        assert op.findtext("connectionId") == "conn-42"
+
+    def test_without_connection_id(self) -> None:
+        xml = build_query_recursive(_header())
+        root = _parse_envelope(xml)
+        op = _get_body_operation(root)
+        assert etree.QName(op.tag).localname == "queryRecursive"
+        assert op.findtext("connectionId") is None
+
+    def test_correlation_id_roundtrip(self) -> None:
+        xml = build_query_recursive(_header("urn:uuid:recursive-corr"), connection_id="conn-42")
+        assert parse_correlation_id(xml) == "urn:uuid:recursive-corr"
+
+    def test_header_fields(self) -> None:
+        xml = build_query_recursive(_header("urn:uuid:qr-corr"))
+        root = _parse_envelope(xml)
+        fields = _get_header_fields(root)
+        assert fields["correlationId"] == "urn:uuid:qr-corr"
+        assert fields["requesterNSA"] == "urn:ogf:network:req:2025:nsa"
+        assert fields["providerNSA"] == "urn:ogf:network:prov:2025:nsa"

@@ -118,13 +118,25 @@ def build_terminate(header: NsiHeader, connection_id: str) -> bytes:
     return _build_connection_id_operation(header, "terminate", connection_id)
 
 
+def _build_optional_connection_id_operation(
+    header: NsiHeader, operation_tag: str, connection_id: str | None = None
+) -> bytes:
+    """Build an NSI request envelope whose body contains an optional connectionId."""
+    envelope, body = _build_envelope(header)
+    op = etree.SubElement(body, f"{_C}{operation_tag}")
+    if connection_id is not None:
+        etree.SubElement(op, "connectionId").text = connection_id
+    return _serialize(envelope)
+
+
 def build_query_summary_sync(header: NsiHeader, connection_id: str | None = None) -> bytes:
     """Build a NSI querySummarySync request envelope."""
-    envelope, body = _build_envelope(header)
-    qss = etree.SubElement(body, f"{_C}querySummarySync")
-    if connection_id is not None:
-        etree.SubElement(qss, "connectionId").text = connection_id
-    return _serialize(envelope)
+    return _build_optional_connection_id_operation(header, "querySummarySync", connection_id)
+
+
+def build_query_recursive(header: NsiHeader, connection_id: str | None = None) -> bytes:
+    """Build a NSI queryRecursive request envelope."""
+    return _build_optional_connection_id_operation(header, "queryRecursive", connection_id)
 
 
 def build_query_notification_sync(header: NsiHeader, connection_id: str) -> bytes:

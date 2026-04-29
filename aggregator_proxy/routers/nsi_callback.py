@@ -26,6 +26,7 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
+from lxml import etree
 
 from aggregator_proxy.dependencies import get_reservation_store
 from aggregator_proxy.nsi_soap import DataPlaneStateChange, parse, parse_correlation_id
@@ -48,8 +49,14 @@ async def nsi_callback(
     logger.debug("Inbound NSI callback XML", xml=xml_bytes.decode(errors="replace"))
 
     try:
-        correlation_id = parse_correlation_id(xml_bytes)
-        message = parse(xml_bytes)
+        root = etree.fromstring(xml_bytes)  # noqa: S320
+    except etree.XMLSyntaxError:
+        logger.exception("Malformed XML in incoming NSI callback")
+        return Response(status_code=400)
+
+    try:
+        correlation_id = parse_correlation_id(root)
+        message = parse(root)
     except ValueError:
         logger.exception("Failed to parse incoming NSI callback")
         return Response(status_code=400)

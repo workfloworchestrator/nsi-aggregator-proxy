@@ -16,53 +16,32 @@
 """Tests for POST /reservations/{connectionId}/provision."""
 
 import asyncio
+from collections.abc import Callable
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from aggregator_proxy.main import app
-from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
+from aggregator_proxy.models import ReservationStatus
 from aggregator_proxy.nsi_soap import parse_correlation_id
-from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from tests.conftest import (
+    build_acknowledgment_xml,
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
     build_query_summary_sync_response,
+    build_soap_envelope,
+    get_pending_correlation_id,
+    make_reservation,
 )
-
-_C = NSMAP["nsi_ctypes"]
-_H = NSMAP["nsi_headers"]
-_S = NSMAP["soapenv"]
 
 CALLBACK_URL = "http://callback.example.com/result"
 CONNECTION_ID = "test-conn-123"
 
 
-def _make_soap(body_xml: str, correlation_id: str) -> bytes:
-    """Wrap an NSI body element in a full SOAP envelope with nsiHeader."""
-    return f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:type="{_C}">
-  <soapenv:Header>
-    <head:nsiHeader>
-      <correlationId>{correlation_id}</correlationId>
-    </head:nsiHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    {body_xml}
-  </soapenv:Body>
-</soapenv:Envelope>""".encode()
-
-
-def _acknowledgment_xml(correlation_id: str) -> bytes:
-    """SOAP acknowledgment response (sync reply to provision)."""
-    return _make_soap("<acknowledgment/>", correlation_id)
-
-
 def _provision_confirmed_xml(correlation_id: str) -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"<provisionConfirmed><connectionId>{CONNECTION_ID}</connectionId></provisionConfirmed>",
         correlation_id=correlation_id,
     )
@@ -72,7 +51,7 @@ def _data_plane_state_change_xml(
     active: bool = True,
     correlation_id: str = "urn:uuid:aggregator-generated-id",
 ) -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"""\
 <dataPlaneStateChange>
   <connectionId>{CONNECTION_ID}</connectionId>
@@ -89,42 +68,13 @@ def _data_plane_state_change_xml(
 
 
 def _make_reservation(status: ReservationStatus = ReservationStatus.RESERVED) -> Reservation:
-    return Reservation(
-        connection_id=CONNECTION_ID,
-        status=status,
-        global_reservation_id=None,
-        description="test reservation",
-        criteria=CriteriaResponse(
-            version=1,
-            serviceType="http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
-            p2ps=P2PS(
-                capacity=1000,
-                sourceSTP="urn:ogf:network:example.net:2025:src?vlan=100",
-                destSTP="urn:ogf:network:example.net:2025:dst?vlan=200",
-            ),
-        ),
-        requester_nsa="urn:ogf:network:example.net:2025:nsa:requester",
-        provider_nsa="urn:ogf:network:example.net:2025:nsa:provider",
-        callback_url=CALLBACK_URL,
-    )
-
-
-def _get_pending_correlation_id(store: ReservationStore) -> str:
-    """Extract the single pending correlation_id from the store."""
-    keys = list(store._pending.keys())  # noqa: SLF001
-    assert len(keys) == 1, f"Expected exactly 1 pending, got {len(keys)}"
-    return keys[0]
-
-
-@pytest.fixture()
-def store() -> ReservationStore:
-    return ReservationStore()
+    return make_reservation(connection_id=CONNECTION_ID, status=status, callback_url=CALLBACK_URL)
 
 
 def _make_nsi_handler(
     provision_state: str = "Released",
     data_plane_active: bool = False,
-) -> object:
+) -> Callable[[httpx.Request], httpx.Response]:
     """Create a mock NSI handler that returns the given states for querySummarySync."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -144,7 +94,7 @@ def _make_nsi_handler(
                     ),
                 )
             return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
-        return httpx.Response(200, content=_acknowledgment_xml(cid))
+        return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
     return handler
 
@@ -234,10 +184,8 @@ class TestProvisionAggregatorFailure:
                     content=build_query_summary_sync_response(connection_id=CONNECTION_ID, correlation_id=cid),
                 )
             # Return a reserveResponse instead of acknowledgment
-            return httpx.Response(
-                200,
-                content=_make_soap("<reserveResponse><connectionId>wrong</connectionId></reserveResponse>", cid),
-            )
+            body = "<reserveResponse><connectionId>wrong</connectionId></reserveResponse>"
+            return httpx.Response(200, content=build_soap_envelope(body, cid))
 
         app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         app.state.callback_client = httpx.AsyncClient()
@@ -293,7 +241,7 @@ class TestProvisionHappyPath:
                     assert store.get(CONNECTION_ID).status == ReservationStatus.ACTIVATING  # type: ignore[union-attr]
 
                     # Get the actual correlation_id registered by the provision endpoint
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate provisionConfirmed callback
                     await test_client.post(
@@ -322,7 +270,7 @@ class TestProvisionHappyPath:
                 content=build_query_summary_sync_response(connection_id=CONNECTION_ID, correlation_id=cid),
             )
         self.__class__._captured_correlation_id = cid
-        return httpx.Response(200, content=_acknowledgment_xml(cid))
+        return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
     @staticmethod
     def _callback_handler(request: httpx.Request) -> httpx.Response:
@@ -352,7 +300,7 @@ class TestProvisionDataPlaneInactiveThenActive:
                     assert resp.status_code == 202
                     await asyncio.sleep(0.05)
 
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # provisionConfirmed
                     await test_client.post("/nsi/v2/callback", content=_provision_confirmed_xml(cid))
@@ -379,7 +327,7 @@ class TestProvisionDataPlaneInactiveThenActive:
 
     @staticmethod
     def _nsi_handler(request: httpx.Request) -> httpx.Response:
-        return _make_nsi_handler()(request)  # type: ignore[operator]
+        return _make_nsi_handler()(request)
 
     @staticmethod
     def _callback_handler(request: httpx.Request) -> httpx.Response:
@@ -444,7 +392,7 @@ class TestProvisionTimeout:
                     assert resp.status_code == 202
                     await asyncio.sleep(0.05)
 
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Send provisionConfirmed
                     await test_client.post("/nsi/v2/callback", content=_provision_confirmed_xml(cid))
@@ -456,7 +404,7 @@ class TestProvisionTimeout:
 
     @staticmethod
     def _nsi_handler(request: httpx.Request) -> httpx.Response:
-        return _make_nsi_handler()(request)  # type: ignore[operator]
+        return _make_nsi_handler()(request)
 
     @staticmethod
     def _callback_handler(request: httpx.Request) -> httpx.Response:

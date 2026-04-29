@@ -25,7 +25,11 @@ os.environ.setdefault("AGGREGATOR_PROXY_BASE_URL", "http://proxy.test")
 os.environ.setdefault("AGGREGATOR_PROXY_REQUESTER_NSA", "urn:ogf:network:example.net:2025:nsa:requester")
 os.environ.setdefault("AGGREGATOR_PROXY_PROVIDER_NSA", "urn:ogf:network:example.net:2025:nsa:provider")
 
+import pytest  # noqa: E402
+
+from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus  # noqa: E402
 from aggregator_proxy.nsi_soap.namespaces import NSMAP  # noqa: E402
+from aggregator_proxy.reservation_store import Reservation, ReservationStore  # noqa: E402
 
 _C = NSMAP["nsi_ctypes"]
 _H = NSMAP["nsi_headers"]
@@ -273,3 +277,69 @@ def build_empty_query_summary_sync_response(correlation_id: str) -> bytes:
     <nsi_ctypes:querySummarySyncConfirmed/>
   </soapenv:Body>
 </soapenv:Envelope>""".encode()
+
+
+# ---------------------------------------------------------------------------
+# Shared test helpers
+# ---------------------------------------------------------------------------
+
+
+def build_soap_envelope(body_xml: str, correlation_id: str) -> bytes:
+    """Wrap an NSI body fragment in a full SOAP envelope with nsiHeader."""
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:type="{_C}">
+  <soapenv:Header>
+    <head:nsiHeader>
+      <correlationId>{correlation_id}</correlationId>
+    </head:nsiHeader>
+  </soapenv:Header>
+  <soapenv:Body>
+    {body_xml}
+  </soapenv:Body>
+</soapenv:Envelope>""".encode()
+
+
+def build_acknowledgment_xml(correlation_id: str) -> bytes:
+    """Build an NSI acknowledgment SOAP response."""
+    return build_soap_envelope("<acknowledgment/>", correlation_id)
+
+
+def get_pending_correlation_id(store: ReservationStore) -> str:
+    """Extract the single pending correlation_id from the store."""
+    keys = list(store._pending.keys())  # noqa: SLF001
+    assert len(keys) == 1, f"Expected exactly 1 pending, got {len(keys)}"
+    return keys[0]
+
+
+def make_reservation(
+    connection_id: str = "test-conn-001",
+    status: ReservationStatus = ReservationStatus.RESERVED,
+    global_reservation_id: str | None = None,
+    description: str = "test reservation",
+    callback_url: str = "http://callback.example.com/result",
+) -> Reservation:
+    """Build a Reservation for testing with sensible defaults."""
+    return Reservation(
+        connection_id=connection_id,
+        status=status,
+        global_reservation_id=global_reservation_id,
+        description=description,
+        criteria=CriteriaResponse(
+            version=1,
+            serviceType="http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+            p2ps=P2PS(
+                capacity=1000,
+                sourceSTP="urn:ogf:network:example.net:2025:src?vlan=100",
+                destSTP="urn:ogf:network:example.net:2025:dst?vlan=200",
+            ),
+        ),
+        requester_nsa="urn:ogf:network:example.net:2025:nsa:requester",
+        callback_url=callback_url,
+    )
+
+
+@pytest.fixture()
+def store() -> ReservationStore:
+    """Provide a fresh ReservationStore for each test."""
+    return ReservationStore()

@@ -55,8 +55,7 @@ def _build_envelope(header: NsiHeader) -> tuple[etree._Element, etree._Element]:
 
 
 def _serialize(envelope: etree._Element) -> bytes:
-    body = etree.tostring(envelope, xml_declaration=False, encoding="unicode")
-    return f'<?xml version="1.0" encoding="UTF-8"?>{body}'.encode("UTF-8")
+    return etree.tostring(envelope, xml_declaration=True, encoding="UTF-8")
 
 
 def build_reserve(

@@ -145,10 +145,16 @@ async def _send_callback(
 
 def _query_header() -> NsiHeader:
     """Build an NsiHeader for querySummarySync requests."""
+    return _operation_header(settings.requester_nsa)
+
+
+def _operation_header(requester_nsa: str, correlation_id: str | None = None) -> NsiHeader:
+    """Build an NsiHeader for any outbound NSI operation."""
     return NsiHeader(
-        requester_nsa=settings.requester_nsa,
+        requester_nsa=requester_nsa,
         provider_nsa=settings.provider_nsa,
         reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
+        correlation_id=correlation_id or f"urn:uuid:{uuid4()}",
     )
 
 
@@ -296,12 +302,11 @@ async def _query_error_events(
     return events
 
 
-async def _refresh_reservation(
-    connection_id: str,
+async def _query_summary_sync(
     nsi_client: httpx.AsyncClient,
-    store: ReservationStore,
-) -> tuple[Reservation | None, QueryReservation | None]:
-    """Query the aggregator for a single reservation and update the store."""
+    connection_id: str,
+) -> list[QueryReservation]:
+    """Query the aggregator for a single reservation via querySummarySync."""
     header = _query_header()
     soap_bytes = build_query_summary_sync(header, connection_id=connection_id)
     logger.debug("Outbound SOAP querySummarySync request", xml=soap_bytes.decode(), connection_id=connection_id)
@@ -314,11 +319,28 @@ async def _refresh_reservation(
         logger.error("Failed to refresh reservation from aggregator", connection_id=connection_id, error=str(exc))
         raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
     logger.debug("Inbound SOAP querySummarySyncConfirmed response", xml=response.text, connection_id=connection_id)
-    query_reservations = parse_query_summary_sync(response.content)
+    return parse_query_summary_sync(response.content)
+
+
+async def _refresh_reservation(
+    connection_id: str,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> tuple[Reservation | None, QueryReservation | None]:
+    """Query the aggregator for a single reservation and update the store."""
+    query_reservations, error_events = await asyncio.gather(
+        _query_summary_sync(nsi_client, connection_id),
+        _query_error_events(nsi_client, connection_id),
+    )
     if not query_reservations:
         logger.info("Reservation not found on aggregator", connection_id=connection_id)
         return None, None
-    return await _finalize_refresh(query_reservations[0], nsi_client, store)
+    qr = query_reservations[0]
+    reservation = _update_store_from_query(store, qr, error_events)
+    logger.info(
+        "Reservation state refreshed from aggregator", connection_id=qr.connection_id, status=reservation.status
+    )
+    return reservation, qr
 
 
 async def _finalize_refresh(
@@ -481,12 +503,7 @@ async def _complete_reserve(
         commit_future = store.register_pending(commit_correlation_id)
         reservation = store.get(connection_id)
         requester_nsa = reservation.requester_nsa if reservation is not None else ""
-        header = NsiHeader(
-            requester_nsa=requester_nsa,
-            provider_nsa=settings.provider_nsa,
-            reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
-            correlation_id=commit_correlation_id,
-        )
+        header = _operation_header(requester_nsa, commit_correlation_id)
         soap_bytes = build_reserve_commit(header, connection_id)
         log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
         log.info("Sending reserveCommit to aggregator")
@@ -576,12 +593,7 @@ async def create_reservation(
     reserve_future = store.register_pending(correlation_id)
 
     now = datetime.now(timezone.utc)
-    header = NsiHeader(
-        requester_nsa=body.requesterNSA,
-        provider_nsa=settings.provider_nsa,
-        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
-        correlation_id=correlation_id,
-    )
+    header = _operation_header(body.requesterNSA, correlation_id)
     soap_bytes = build_reserve(
         header=header,
         global_reservation_id=body.globalReservationId,
@@ -631,7 +643,6 @@ async def create_reservation(
                 p2ps=body.criteria.p2ps,
             ),
             requester_nsa=body.requesterNSA,
-            provider_nsa=settings.provider_nsa,
             callback_url=str(body.callbackURL),
         )
     )
@@ -648,6 +659,33 @@ async def create_reservation(
             instance=f"/reservations/{connection_id}",
         ).model_dump(),
     )
+
+
+async def _await_dataplane_change(
+    connection_id: str,
+    target_active: bool,
+    store: ReservationStore,
+) -> bool:
+    """Wait for DataPlaneStateChange matching *target_active*. Returns True on success."""
+    remaining = float(settings.dataplane_timeout)
+    loop = asyncio.get_running_loop()
+    while remaining > 0:
+        dp_future = store.register_pending_by_connection(connection_id)
+        start = loop.time()
+        try:
+            dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
+        except asyncio.TimeoutError:
+            store.cancel_pending_by_connection(connection_id)
+            return False
+        remaining -= loop.time() - start
+        match dp_msg:
+            case DataPlaneStateChange(active=active) if active == target_active:
+                return True
+            case DataPlaneStateChange():
+                pass
+            case _:
+                pass
+    return False
 
 
 async def _complete_provision(
@@ -687,37 +725,15 @@ async def _complete_provision(
                 return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
-        remaining = float(settings.dataplane_timeout)
-        while remaining > 0:
-            dp_future = store.register_pending_by_connection(connection_id)
-            start = asyncio.get_event_loop().time()
-            try:
-                dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
-            except asyncio.TimeoutError:
-                store.cancel_pending_by_connection(connection_id)
-                await fail("no DataPlaneStateChange(active=True) received within timeout")
-                return
+        if not await _await_dataplane_change(connection_id, target_active=True, store=store):
+            await fail("no DataPlaneStateChange(active=True) received within timeout")
+            return
 
-            elapsed = asyncio.get_event_loop().time() - start
-            remaining -= elapsed
-
-            match dp_msg:
-                case DataPlaneStateChange(active=True):
-                    store.update_status(connection_id, ReservationStatus.ACTIVATED)
-                    reservation = store.get(connection_id)
-                    if reservation is not None:
-                        await _send_callback(callback_client, reservation.callback_url, reservation)
-                    log.info("Data plane active, state is ACTIVATED")
-                    return
-                case DataPlaneStateChange(active=False):
-                    log.debug("DataPlaneStateChange active=False, continuing to wait")
-                case _:
-                    log.warning(
-                        "Unexpected message while waiting for dataPlaneStateChange",
-                        msg_type=type(dp_msg).__name__,
-                    )
-
-        await fail("no DataPlaneStateChange(active=True) received within timeout")
+        store.update_status(connection_id, ReservationStatus.ACTIVATED)
+        reservation = store.get(connection_id)
+        if reservation is not None:
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+        log.info("Data plane active, state is ACTIVATED")
 
     except Exception:
         log.exception("Unexpected error in _complete_provision")
@@ -762,12 +778,7 @@ async def provision_reservation(
     correlation_id = f"urn:uuid:{uuid4()}"
     provision_future = store.register_pending(correlation_id)
 
-    header = NsiHeader(
-        requester_nsa=reservation.requester_nsa,
-        provider_nsa=settings.provider_nsa,
-        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
-        correlation_id=correlation_id,
-    )
+    header = _operation_header(reservation.requester_nsa, correlation_id)
     soap_bytes = build_provision(header, connectionId)
     log.debug("Outbound SOAP provision request", xml=soap_bytes.decode())
     log.info("Sending provision request to aggregator")
@@ -841,37 +852,15 @@ async def _complete_release(
                 return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
-        remaining = float(settings.dataplane_timeout)
-        while remaining > 0:
-            dp_future = store.register_pending_by_connection(connection_id)
-            start = asyncio.get_event_loop().time()
-            try:
-                dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
-            except asyncio.TimeoutError:
-                store.cancel_pending_by_connection(connection_id)
-                await fail("no DataPlaneStateChange(active=False) received within timeout")
-                return
+        if not await _await_dataplane_change(connection_id, target_active=False, store=store):
+            await fail("no DataPlaneStateChange(active=False) received within timeout")
+            return
 
-            elapsed = asyncio.get_event_loop().time() - start
-            remaining -= elapsed
-
-            match dp_msg:
-                case DataPlaneStateChange(active=False):
-                    store.update_status(connection_id, ReservationStatus.RESERVED)
-                    reservation = store.get(connection_id)
-                    if reservation is not None:
-                        await _send_callback(callback_client, reservation.callback_url, reservation)
-                    log.info("Data plane deactivated, state is RESERVED")
-                    return
-                case DataPlaneStateChange(active=True):
-                    log.debug("DataPlaneStateChange active=True, continuing to wait")
-                case _:
-                    log.warning(
-                        "Unexpected message while waiting for dataPlaneStateChange",
-                        msg_type=type(dp_msg).__name__,
-                    )
-
-        await fail("no DataPlaneStateChange(active=False) received within timeout")
+        store.update_status(connection_id, ReservationStatus.RESERVED)
+        reservation = store.get(connection_id)
+        if reservation is not None:
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+        log.info("Data plane deactivated, state is RESERVED")
 
     except Exception:
         log.exception("Unexpected error in _complete_release")
@@ -916,12 +905,7 @@ async def release_reservation(
     correlation_id = f"urn:uuid:{uuid4()}"
     release_future = store.register_pending(correlation_id)
 
-    header = NsiHeader(
-        requester_nsa=reservation.requester_nsa,
-        provider_nsa=settings.provider_nsa,
-        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
-        correlation_id=correlation_id,
-    )
+    header = _operation_header(reservation.requester_nsa, correlation_id)
     soap_bytes = build_release(header, connectionId)
     log.debug("Outbound SOAP release request", xml=soap_bytes.decode())
     log.info("Sending release request to aggregator")
@@ -1035,12 +1019,7 @@ async def terminate_reservation(
     correlation_id = f"urn:uuid:{uuid4()}"
     terminate_future = store.register_pending(correlation_id)
 
-    header = NsiHeader(
-        requester_nsa=reservation.requester_nsa,
-        provider_nsa=settings.provider_nsa,
-        reply_to=f"{settings.base_url}{NSI_CALLBACK_PATH}",
-        correlation_id=correlation_id,
-    )
+    header = _operation_header(reservation.requester_nsa, correlation_id)
     soap_bytes = build_terminate(header, connectionId)
     log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
     log.info("Sending terminate request to aggregator")

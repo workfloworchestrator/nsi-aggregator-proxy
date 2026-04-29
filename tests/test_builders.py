@@ -228,7 +228,7 @@ class TestBuildQuerySummarySync:
 
     def test_xml_declaration_present(self) -> None:
         xml = build_query_summary_sync(_header())
-        assert xml.startswith(b'<?xml version="1.0" encoding="UTF-8"?>')
+        assert xml.startswith(b"<?xml version='1.0' encoding='UTF-8'?>")
 
 
 class TestBuildQueryRecursive:

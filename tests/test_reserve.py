@@ -27,13 +27,13 @@ from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import ReservationStore
 from tests.conftest import (
+    build_acknowledgment_xml,
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
+    build_soap_envelope,
+    get_pending_correlation_id,
 )
 
-_C = NSMAP["nsi_ctypes"]
-_H = NSMAP["nsi_headers"]
-_S = NSMAP["soapenv"]
 _P = NSMAP["nsi_p2p"]
 
 CALLBACK_URL = "http://callback.example.com/result"
@@ -41,30 +41,15 @@ PROVIDER_NSA = "urn:ogf:network:example.net:2025:nsa:provider"
 REQUESTER_NSA = "urn:ogf:network:example.net:2025:nsa:requester"
 
 
-def _make_soap(body_xml: str, correlation_id: str) -> bytes:
-    return f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:type="{_C}">
-  <soapenv:Header>
-    <head:nsiHeader>
-      <correlationId>{correlation_id}</correlationId>
-    </head:nsiHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    {body_xml}
-  </soapenv:Body>
-</soapenv:Envelope>""".encode()
-
-
 def _reserve_response_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"<reserveResponse><connectionId>{connection_id}</connectionId></reserveResponse>",
         correlation_id,
     )
 
 
 def _reserve_confirmed_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"""\
 <reserveConfirmed>
   <connectionId>{connection_id}</connectionId>
@@ -82,14 +67,14 @@ def _reserve_confirmed_xml(correlation_id: str, connection_id: str = "agg-conn-0
 
 
 def _reserve_commit_confirmed_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"<reserveCommitConfirmed><connectionId>{connection_id}</connectionId></reserveCommitConfirmed>",
         correlation_id,
     )
 
 
 def _reserve_failed_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"""\
 <reserveFailed>
   <connectionId>{connection_id}</connectionId>
@@ -105,7 +90,7 @@ def _reserve_failed_xml(correlation_id: str, connection_id: str = "agg-conn-001"
 
 
 def _reserve_timeout_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"""\
 <reserveTimeout>
   <connectionId>{connection_id}</connectionId>
@@ -120,7 +105,7 @@ def _reserve_timeout_xml(correlation_id: str, connection_id: str = "agg-conn-001
 
 
 def _reserve_commit_failed_xml(correlation_id: str, connection_id: str = "agg-conn-001") -> bytes:
-    return _make_soap(
+    return build_soap_envelope(
         f"""\
 <reserveCommitFailed>
   <connectionId>{connection_id}</connectionId>
@@ -133,10 +118,6 @@ def _reserve_commit_failed_xml(correlation_id: str, connection_id: str = "agg-co
 </reserveCommitFailed>""",
         correlation_id,
     )
-
-
-def _acknowledgment_xml(correlation_id: str) -> bytes:
-    return _make_soap("<acknowledgment/>", correlation_id)
 
 
 def _reserve_request_body(
@@ -160,17 +141,6 @@ def _reserve_request_body(
     if global_reservation_id is not None:
         body["globalReservationId"] = global_reservation_id
     return body
-
-
-def _get_pending_correlation_id(store: ReservationStore) -> str:
-    keys = list(store._pending.keys())  # noqa: SLF001
-    assert len(keys) == 1, f"Expected exactly 1 pending, got {len(keys)}"
-    return keys[0]
-
-
-@pytest.fixture()
-def store() -> ReservationStore:
-    return ReservationStore()
 
 
 class TestReserveValidation:
@@ -247,7 +217,7 @@ class TestReserveAggregatorFailure:
 
         def bad_handler(request: httpx.Request) -> httpx.Response:
             cid = parse_correlation_id(request.content)
-            return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
         app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(bad_handler))
         app.state.callback_client = httpx.AsyncClient()
@@ -275,7 +245,7 @@ class TestReserveHappyPath:
             if "querySummarySync" in body:
                 return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
             if "reserveCommit" in body:
-                return httpx.Response(200, content=_acknowledgment_xml(cid))
+                return httpx.Response(200, content=build_acknowledgment_xml(cid))
             # First call is reserve → return reserveResponse
             reserve_correlation_id = cid
             return httpx.Response(200, content=_reserve_response_xml(cid))
@@ -302,7 +272,7 @@ class TestReserveHappyPath:
                     assert store.get("agg-conn-001").status == ReservationStatus.RESERVING  # type: ignore[union-attr]
 
                     # Get the correlation_id from the pending store
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate reserveConfirmed callback
                     await test_client.post(
@@ -313,7 +283,7 @@ class TestReserveHappyPath:
 
                     # After reserveConfirmed, the background task sends reserveCommit
                     # and waits for reserveCommitConfirmed. Get the new pending correlation_id.
-                    commit_cid = _get_pending_correlation_id(store)
+                    commit_cid = get_pending_correlation_id(store)
 
                     # Simulate reserveCommitConfirmed callback
                     await test_client.post(
@@ -350,7 +320,7 @@ class TestReserveFailedCallback:
                     assert resp.status_code == 202
 
                     await asyncio.sleep(0.05)
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate reserveFailed callback
                     await test_client.post(
@@ -391,7 +361,7 @@ class TestReserveTimeoutCallback:
                     assert resp.status_code == 202
 
                     await asyncio.sleep(0.05)
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate reserveTimeout callback
                     await test_client.post(
@@ -456,7 +426,7 @@ class TestReserveCommitFailed:
             if "querySummarySync" in body:
                 return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
             if "reserveCommit" in body:
-                return httpx.Response(200, content=_acknowledgment_xml(cid))
+                return httpx.Response(200, content=build_acknowledgment_xml(cid))
             return httpx.Response(200, content=_reserve_response_xml(cid))
 
         def callback_handler(request: httpx.Request) -> httpx.Response:
@@ -475,14 +445,14 @@ class TestReserveCommitFailed:
                     assert resp.status_code == 202
 
                     await asyncio.sleep(0.05)
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate reserveConfirmed callback
                     await test_client.post("/nsi/v2/callback", content=_reserve_confirmed_xml(cid))
                     await asyncio.sleep(0.05)
 
                     # Get commit correlation_id
-                    commit_cid = _get_pending_correlation_id(store)
+                    commit_cid = get_pending_correlation_id(store)
 
                     # Simulate reserveCommitFailed callback
                     await test_client.post(
@@ -532,7 +502,7 @@ class TestReserveCommitAggregatorUnreachable:
                     assert resp.status_code == 202
 
                     await asyncio.sleep(0.05)
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Make subsequent NSI calls fail
                     commit_should_fail = True
@@ -565,7 +535,7 @@ class TestReserveCommitTimeout:
             if "querySummarySync" in body:
                 return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
             if "reserveCommit" in body:
-                return httpx.Response(200, content=_acknowledgment_xml(cid))
+                return httpx.Response(200, content=build_acknowledgment_xml(cid))
             return httpx.Response(200, content=_reserve_response_xml(cid))
 
         def callback_handler(request: httpx.Request) -> httpx.Response:
@@ -584,7 +554,7 @@ class TestReserveCommitTimeout:
                     assert resp.status_code == 202
 
                     await asyncio.sleep(0.05)
-                    cid = _get_pending_correlation_id(store)
+                    cid = get_pending_correlation_id(store)
 
                     # Simulate reserveConfirmed → triggers reserveCommit
                     await test_client.post("/nsi/v2/callback", content=_reserve_confirmed_xml(cid))

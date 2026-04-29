@@ -15,12 +15,14 @@
 
 """Tests for GET /reservations and GET /reservations/{connectionId}."""
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from aggregator_proxy.main import app
-from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
+from aggregator_proxy.models import ReservationStatus
 from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from tests.conftest import (
@@ -29,6 +31,7 @@ from tests.conftest import (
     build_query_notification_sync_response,
     build_query_summary_sync_response,
     build_query_summary_sync_response_with_children,
+    make_reservation,
 )
 
 CONNECTION_ID_1 = "conn-001"
@@ -41,23 +44,11 @@ def _make_reservation(
     global_reservation_id: str | None = "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
     description: str = "test reservation",
 ) -> Reservation:
-    return Reservation(
+    return make_reservation(
         connection_id=connection_id,
         status=status,
         global_reservation_id=global_reservation_id,
         description=description,
-        criteria=CriteriaResponse(
-            version=1,
-            serviceType="http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
-            p2ps=P2PS(
-                capacity=1000,
-                sourceSTP="urn:ogf:network:example.net:2025:src?vlan=100",
-                destSTP="urn:ogf:network:example.net:2025:dst?vlan=200",
-            ),
-        ),
-        requester_nsa="urn:ogf:network:example.net:2025:nsa:requester",
-        provider_nsa="urn:ogf:network:example.net:2025:nsa:provider",
-        callback_url="http://callback.example.com/result",
     )
 
 
@@ -72,7 +63,9 @@ def _nsi_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200)
 
 
-def _nsi_handler_with_reservation(connection_id: str, provision_state: str = "Released") -> object:
+def _nsi_handler_with_reservation(
+    connection_id: str, provision_state: str = "Released"
+) -> Callable[[httpx.Request], httpx.Response]:
     """Return an NSI handler that returns a querySummarySyncConfirmed with one reservation."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -90,11 +83,6 @@ def _nsi_handler_with_reservation(connection_id: str, provision_state: str = "Re
         )
 
     return handler
-
-
-@pytest.fixture()
-def store() -> ReservationStore:
-    return ReservationStore()
 
 
 @pytest.fixture()
@@ -232,7 +220,7 @@ _CHILDREN_XML = build_child_xml(
 )
 
 
-def _nsi_handler_with_children(connection_id: str) -> object:
+def _nsi_handler_with_children(connection_id: str) -> Callable[[httpx.Request], httpx.Response]:
     """Return an NSI handler that returns querySummarySyncConfirmed with children."""
 
     def handler(request: httpx.Request) -> httpx.Response:

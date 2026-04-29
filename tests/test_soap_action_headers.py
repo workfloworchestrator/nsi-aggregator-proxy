@@ -22,21 +22,18 @@ import httpx
 import pytest
 
 from aggregator_proxy.main import app
-from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
+from aggregator_proxy.models import ReservationStatus
 from aggregator_proxy.nsi_soap import parse_correlation_id
-from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from tests.conftest import (
+    build_acknowledgment_xml,
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
     build_query_recursive_confirmed_response,
     build_query_summary_sync_response,
+    build_soap_envelope,
+    make_reservation,
 )
-
-_C = NSMAP["nsi_ctypes"]
-_H = NSMAP["nsi_headers"]
-_S = NSMAP["soapenv"]
-_P = NSMAP["nsi_p2p"]
 
 _SOAP_ACTION_BASE = "http://schemas.ogf.org/nsi/2013/12/connection/service"
 
@@ -46,44 +43,8 @@ PROVIDER_NSA = "urn:ogf:network:example.net:2025:nsa:provider"
 REQUESTER_NSA = "urn:ogf:network:example.net:2025:nsa:requester"
 
 
-def _make_soap(body_xml: str, correlation_id: str) -> bytes:
-    return f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:type="{_C}">
-  <soapenv:Header>
-    <head:nsiHeader>
-      <correlationId>{correlation_id}</correlationId>
-    </head:nsiHeader>
-  </soapenv:Header>
-  <soapenv:Body>
-    {body_xml}
-  </soapenv:Body>
-</soapenv:Envelope>""".encode()
-
-
-def _acknowledgment_xml(correlation_id: str) -> bytes:
-    return _make_soap("<acknowledgment/>", correlation_id)
-
-
 def _make_reservation(status: ReservationStatus = ReservationStatus.RESERVED) -> Reservation:
-    return Reservation(
-        connection_id=CONNECTION_ID,
-        status=status,
-        global_reservation_id=None,
-        description="test reservation",
-        criteria=CriteriaResponse(
-            version=1,
-            serviceType="http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
-            p2ps=P2PS(
-                capacity=1000,
-                sourceSTP="urn:ogf:network:example.net:2025:src?vlan=100",
-                destSTP="urn:ogf:network:example.net:2025:dst?vlan=200",
-            ),
-        ),
-        requester_nsa=REQUESTER_NSA,
-        provider_nsa=PROVIDER_NSA,
-        callback_url=CALLBACK_URL,
-    )
+    return make_reservation(connection_id=CONNECTION_ID, status=status, callback_url=CALLBACK_URL)
 
 
 RequestRecorder = Callable[[httpx.Request], None]
@@ -157,11 +118,11 @@ class TestReserveSoapAction:
             if "querySummarySync" in body:
                 return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
             if "reserveCommit" in body:
-                return httpx.Response(200, content=_acknowledgment_xml(cid))
+                return httpx.Response(200, content=build_acknowledgment_xml(cid))
             # reserve
             return httpx.Response(
                 200,
-                content=_make_soap(
+                content=build_soap_envelope(
                     f"<reserveResponse><connectionId>{CONNECTION_ID}</connectionId></reserveResponse>", cid
                 ),
             )
@@ -223,7 +184,7 @@ class TestProvisionSoapAction:
                     ),
                 )
             # provision
-            return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
         handler = _recording_handler(captured, nsi_response)
 
@@ -277,7 +238,7 @@ class TestReleaseSoapAction:
                     ),
                 )
             # release
-            return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
         handler = _recording_handler(captured, nsi_response)
 
@@ -324,7 +285,7 @@ class TestTerminateSoapAction:
                     ),
                 )
             # terminate
-            return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
         handler = _recording_handler(captured, nsi_response)
 
@@ -365,7 +326,7 @@ class TestQueryRecursiveSoapAction:
             if "queryNotificationSync" in body:
                 return httpx.Response(200, content=build_query_notification_sync_response(cid))
             # queryRecursive — return acknowledgment
-            return httpx.Response(200, content=_acknowledgment_xml(cid))
+            return httpx.Response(200, content=build_acknowledgment_xml(cid))
 
         handler = _recording_handler(captured, nsi_response)
 

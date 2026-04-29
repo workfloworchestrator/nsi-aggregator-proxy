@@ -49,11 +49,6 @@ def _envelope(body_xml: str, correlation_id: str = "urn:uuid:test-corr") -> byte
 
 
 @pytest.fixture()
-def store() -> ReservationStore:
-    return ReservationStore()
-
-
-@pytest.fixture()
 def _app_state(store: ReservationStore) -> None:
     app.state.nsi_client = httpx.AsyncClient()
     app.state.callback_client = httpx.AsyncClient()
@@ -153,16 +148,10 @@ class TestCallbackInvalidXml:
     """Test callback with invalid XML returns 400."""
 
     @pytest.mark.anyio()
-    async def test_invalid_xml_raises(self, _app_state: None) -> None:
-        from lxml.etree import XMLSyntaxError
-
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app, raise_app_exceptions=True), base_url="http://test"
-        ) as client:
-            # lxml.etree.XMLSyntaxError is not a ValueError, so the endpoint's
-            # except ValueError does not catch it — it propagates as an unhandled error.
-            with pytest.raises(XMLSyntaxError):
-                await client.post("/nsi/v2/callback", content=b"not xml at all \x00")
+    async def test_invalid_xml_returns_400(self, _app_state: None) -> None:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/nsi/v2/callback", content=b"not xml at all \x00")
+            assert resp.status_code == 400
 
     @pytest.mark.anyio()
     async def test_missing_correlation_id_returns_400(self, _app_state: None) -> None:

@@ -41,6 +41,8 @@ from lxml import etree
 
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 
+XmlInput = bytes | etree._Element
+
 _C = NSMAP["nsi_ctypes"]
 _P = NSMAP["nsi_p2p"]
 
@@ -233,9 +235,9 @@ def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
 # ---------------------------------------------------------------------------
 
 
-def parse(xml_bytes: bytes) -> NsiMessage:
+def parse(xml: XmlInput) -> NsiMessage:
     """Parse any NSI SOAP response or callback and return a typed dataclass."""
-    root = etree.fromstring(xml_bytes)
+    root = etree.fromstring(xml) if isinstance(xml, bytes) else xml
     body = root.find(f"{{{NSMAP['soapenv']}}}Body")
     if body is None or not len(body):
         raise ValueError("No SOAP Body found or Body is empty")
@@ -545,13 +547,13 @@ def parse_query_notification_sync(xml_bytes: bytes) -> list[ErrorEvent]:
     return results
 
 
-def parse_correlation_id(xml_bytes: bytes) -> str:
+def parse_correlation_id(xml: XmlInput) -> str:
     """Extract the correlationId from the SOAP nsiHeader.
 
     Uses local-name() XPath to be robust against namespace prefix variations
     across different NSI aggregator implementations.
     """
-    root = etree.fromstring(xml_bytes)
+    root = etree.fromstring(xml) if isinstance(xml, bytes) else xml
     results: list[str] = root.xpath(  # type: ignore[assignment]
         "//*[local-name()='nsiHeader']/*[local-name()='correlationId']/text()"
     )

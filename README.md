@@ -183,24 +183,146 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 
 The Aggregator Proxy supports two authentication methods: **OIDC** (JWT from oauth2-proxy) and **mTLS** (header from nsi-auth). Authentication is **disabled by default**. When enabled, every request to `/reservations` endpoints must be authenticated via at least one method. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires **mTLS only** (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the NSI aggregator is a machine client that authenticates via mutual TLS, not browser-based OIDC.
 
+#### Architecture
+
+Two separate nginx ingresses protect the Aggregator Proxy API — one for **mTLS** (machine clients and the NSI aggregator) and one for **OIDC** (browser users). Both converge on the same aggregator-proxy instance, which performs a final authentication check before serving data. The `/nsi/v2/callback` endpoint has a separate mTLS-only auth dependency because it receives async SOAP callbacks from the NSI aggregator, which is a machine client.
+
+```mermaid
+flowchart TB
+    classDef client fill:#f0f0f0,stroke:#333
+    classDef ingress fill:#e8f4fd,stroke:#2196F3
+    classDef authsvc fill:#fff3e0,stroke:#FF9800
+    classDef appsvc fill:#e8f5e9,stroke:#4CAF50
+    classDef external fill:#fce4ec,stroke:#E91E63
+    classDef decision fill:#f3e5f5,stroke:#9C27B0
+
+    NSI(["NSI Client\n(with client certificate)"]):::client
+    Aggregator(["NSI Aggregator\n(async SOAP callbacks)"]):::client
+    Browser(["Browser User"]):::client
+    SRAM["SRAM IdP\n(OIDC Provider)"]:::external
+
+    subgraph mTLS_Path["mTLS Ingress — nsi-aggregator-proxy"]
+        direction TB
+        mNginx["nginx ingress controller\n\nauth-tls-verify-client: on\nauth-tls-secret: nsi-auth CA\nauth-url: nsi-auth /validate\nauth-response-headers:\n  X-Auth-Method, X-Client-DN"]:::ingress
+    end
+
+    subgraph OIDC_Path["OIDC Ingress — ana-automation-ui"]
+        direction TB
+        oNginx["nginx ingress controller\n\nauth-url: oauth2-proxy /oauth2/auth\nauth-response-headers:\n  Authorization,\n  X-Auth-Request-Access-Token\nconfiguration-snippet:\n  proxy_set_header X-Auth-Method \"\""]:::ingress
+        Portal["ana-automation-ui\n(portal landing page)"]:::appsvc
+        BackendIngress["Backend ingresses\n/dds-proxy/* /aggregator-proxy/* ..."]:::ingress
+        oNginx --> Portal
+        Portal --> BackendIngress
+    end
+
+    subgraph Auth_Services["Auth Services"]
+        nsiAuth["nsi-auth\n\nValidates client DN\nagainst allowed list"]:::authsvc
+        OAuth2["oauth2-proxy\n\nManages OIDC session\npass_access_token = true\nset_xauthrequest = true"]:::authsvc
+    end
+
+    NSI -->|"TLS handshake\n+ client certificate"| mNginx
+    Aggregator -->|"TLS handshake\n+ client certificate"| mNginx
+    Browser -->|"HTTPS\n+ session cookie"| oNginx
+
+    mNginx -.->|"auth subrequest\n(DN from ssl-client-subject-dn)"| nsiAuth
+    nsiAuth -.->|"200 OK\nX-Auth-Method: mTLS\nX-Client-DN: CN=..."| mNginx
+
+    oNginx -.->|"auth subrequest"| OAuth2
+    OAuth2 -.->|"200 OK\nAuthorization: Bearer JWT\nX-Auth-Request-Access-Token: ..."| oNginx
+    OAuth2 <-.->|"OIDC login\n+ token refresh"| SRAM
+
+    subgraph Aggregator_Proxy["aggregator-proxy (AUTH_ENABLED=true)"]
+        direction TB
+        AuthCheck{"get_authenticated_user\n(/reservations)"}:::decision
+        CallbackAuth{"get_mtls_authenticated_callback\n(/nsi/v2/callback)"}:::decision
+        OIDC_Check["OIDC path\n\nJWT in Authorization or\nX-Auth-Request-Access-Token?\n→ Validate signature, issuer,\n   audience, expiry\n→ Check group membership\n   via userinfo endpoint"]:::appsvc
+        mTLS_Check["mTLS path\n\nX-Auth-Method header present?\n→ Log X-Client-DN for audit"]:::appsvc
+        OK(["200 — Serve data"]):::appsvc
+        Reject(["401 — Unauthorized"]):::client
+        CallbackOK(["200 — Process callback"]):::appsvc
+        CallbackReject(["401 — Unauthorized"]):::client
+
+        AuthCheck -->|"JWT present"| OIDC_Check
+        AuthCheck -->|"No JWT"| mTLS_Check
+        OIDC_Check -->|"Valid"| OK
+        OIDC_Check -->|"Invalid JWT"| Reject
+        mTLS_Check -->|"Header set"| OK
+        mTLS_Check -->|"No header"| Reject
+        CallbackAuth -->|"mTLS header set"| CallbackOK
+        CallbackAuth -->|"No mTLS header"| CallbackReject
+    end
+
+    mNginx -->|"X-Auth-Method: mTLS\nX-Client-DN: CN=...\n(/reservations)"| AuthCheck
+    mNginx -->|"X-Auth-Method: mTLS\nX-Client-DN: CN=...\n(/nsi/v2/callback)"| CallbackAuth
+    BackendIngress -->|"Authorization: Bearer JWT\nX-Auth-Request-Access-Token: ...\n(X-Auth-Method stripped)"| AuthCheck
+```
+
+#### Defense-in-depth measures
+
+| Measure | Purpose |
+|---|---|
+| **mTLS ingress verifies client cert** against CA chain before reaching nsi-auth | Only certificates signed by a trusted CA are accepted |
+| **nsi-auth validates DN** against an allowed list | Even with a valid cert, only pre-approved clients are authorized |
+| **OIDC ingress strips `X-Auth-Method`** header via `configuration-snippet` | Prevents browser users from spoofing mTLS authentication by injecting the header |
+| **Invalid JWT blocks request** even when `X-Auth-Method` is present | A bad JWT is always rejected — mTLS cannot rescue a failed OIDC attempt |
+| **Callback requires mTLS only** — JWT is not accepted | The NSI aggregator is a machine client; OIDC tokens cannot bypass the mTLS requirement on callbacks |
+| **aggregator-proxy requires at least one method** when `AUTH_ENABLED=true` | No unauthenticated passthrough — every request must prove its identity |
+| **Group-based authorization** via OIDC userinfo endpoint | OIDC users can be restricted to specific SRAM groups |
+
+#### Header flow summary
+
+| Header | Set by | Forwarded by | Consumed by |
+|---|---|---|---|
+| `X-Auth-Method: mTLS` | nsi-auth (on 200) | mTLS nginx (`auth-response-headers`) | aggregator-proxy (mTLS auth check on `/reservations` and `/nsi/v2/callback`) |
+| `X-Client-DN` | nsi-auth (on 200) | mTLS nginx (`auth-response-headers`) | aggregator-proxy (audit logging) |
+| `Authorization: Bearer <JWT>` | oauth2-proxy | OIDC nginx (`auth-response-headers`) | aggregator-proxy (OIDC auth check on `/reservations`) |
+| `X-Auth-Request-Access-Token` | oauth2-proxy | OIDC nginx (`auth-response-headers`) | aggregator-proxy (JWT fallback + userinfo lookup) |
+
+#### Configuration
+
 | Variable | Default | Description |
 |---|---|---|
-| `AGGREGATOR_PROXY_AUTH_ENABLED` | `false` | Enable authentication on all reservation endpoints. When `true`, every request must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). |
-| `AGGREGATOR_PROXY_MTLS_HEADER` | _(empty)_ | Header name that nsi-auth sets on successful validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication. |
+| `AGGREGATOR_PROXY_AUTH_ENABLED` | `false` | Enable authentication on all reservation endpoints. When `true`, every request must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). `/health` is always unauthenticated. |
+| `AGGREGATOR_PROXY_MTLS_HEADER` | _(empty)_ | Header name that nsi-auth sets on successful validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication. nsi-auth also sets `X-Client-DN` with the client certificate DN, which is logged for audit purposes. |
 | `AGGREGATOR_PROXY_OIDC_ISSUER` | _(empty)_ | Expected `iss` claim in the JWT. OIDC validation is active when this is set and auth is enabled. |
 | `AGGREGATOR_PROXY_OIDC_AUDIENCE` | _(empty)_ | Expected `aud` claim in the JWT. |
 | `AGGREGATOR_PROXY_OIDC_JWKS_URI` | _(empty)_ | JWKS endpoint URL. Auto-discovered from `{OIDC_ISSUER}/.well-known/openid-configuration` if empty. |
 | `AGGREGATOR_PROXY_OIDC_USERINFO_URI` | _(empty)_ | Userinfo endpoint URL. Auto-discovered from the OIDC configuration if empty. |
 | `AGGREGATOR_PROXY_OIDC_GROUP_CLAIM` | `eduperson_entitlement` | Claim name in the userinfo response that contains group memberships. |
-| `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | `[]` | Groups required for access. Supports comma-separated (`g1,g2`) or JSON array (`["g1","g2"]`). Use `[]` for no group check. **Note:** pydantic-settings JSON-parses `list` env vars, so an empty string will cause a startup error — always use `[]` instead. |
+| `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | `[]` | Groups required for access. Supports comma-separated (`g1,g2`) or JSON array (`["g1","g2"]`). Use `[]` for no group check (any authenticated user is allowed). **Note:** pydantic-settings JSON-parses `list` env vars, so an empty string will cause a startup error — always use `[]` instead. |
 | `AGGREGATOR_PROXY_OIDC_JWKS_CACHE_LIFESPAN` | `300` | JWKS key cache TTL in seconds. |
 | `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | `60` | Userinfo response cache TTL in seconds. |
 
-**Authentication flow** when `AUTH_ENABLED=true`:
+**Authentication flow** for `/reservations` when `AUTH_ENABLED=true`:
 
-1. **OIDC path** (if `OIDC_ISSUER` is set): Check for a JWT in the `Authorization: Bearer` header, falling back to `X-Auth-Request-Access-Token` (set by oauth2-proxy). If a token is present, validate it for signature, issuer, audience, and expiry.
-2. **mTLS path** (if `MTLS_HEADER` is set): Check for the configured header (e.g. `X-Auth-Method`). This header is set by nsi-auth and forwarded by nginx via `auth-response-headers`.
+1. **OIDC path** (if `OIDC_ISSUER` is set): Check for a JWT in the `Authorization: Bearer` header, falling back to `X-Auth-Request-Access-Token` (set by oauth2-proxy). If a token is present, validate it for signature, issuer, audience, and expiry. The `X-Auth-Request-Access-Token` fallback is needed because the nginx ingress controller has a [known issue](https://github.com/kubernetes/ingress-nginx/issues/13163) where it clears the `Authorization` header from auth subrequest responses. If a token is present but invalid, the request is rejected (mTLS does not override a bad JWT).
+2. **mTLS path** (if `MTLS_HEADER` is set): Check for the configured header (e.g. `X-Auth-Method`). This header is set by nsi-auth and forwarded by nginx via `auth-response-headers`. The client certificate DN from `X-Client-DN` is logged for audit.
 3. **Neither**: If no valid credentials are found, the request is rejected with 401.
+
+**Authentication flow** for `/nsi/v2/callback` when `AUTH_ENABLED=true`:
+
+The callback endpoint uses a separate, mTLS-only auth dependency. If `MTLS_HEADER` is set, the configured header must be present. OIDC tokens are not checked — the NSI aggregator is a machine client that authenticates via mutual TLS.
+
+**Access token for group authorization:** When `OIDC_REQUIRED_GROUPS` is set, the proxy needs an access token (via `X-Auth-Request-Access-Token`) to call the OIDC userinfo endpoint for group membership. This header is set by oauth2-proxy when `set_xauthrequest = true` and `pass_access_token = true`. If a valid JWT is present but the access token header is missing, the request is rejected with 401.
+
+#### Error responses
+
+When authentication is enabled, endpoints may return these error responses:
+
+| Status | Detail | Cause |
+|---|---|---|
+| `401` | `Token expired` | JWT `exp` claim is in the past |
+| `401` | `Invalid audience` | JWT `aud` claim does not match `OIDC_AUDIENCE` |
+| `401` | `Invalid issuer` | JWT `iss` claim does not match `OIDC_ISSUER` |
+| `401` | `Invalid token: <reason>` | Other JWT validation failures (missing required claims, bad signature, etc.) |
+| `401` | `Token validation failed` | JWKS key retrieval failed (endpoint unreachable, key not found) |
+| `401` | `Missing access token for group lookup` | Group authorization required but `X-Auth-Request-Access-Token` header missing |
+| `401` | `Authentication required` | No valid credentials found on `/reservations` (no JWT, no mTLS header) |
+| `401` | `mTLS authentication required` | No mTLS header on `/nsi/v2/callback` |
+| `403` | `Insufficient group membership` | User not in any of the required groups |
+| `502` | `Failed to fetch user information` | Userinfo endpoint unreachable or returned an error |
+
+**Defense-in-depth:** The OIDC ingress should strip the `X-Auth-Method` header to prevent clients from spoofing mTLS authentication. With nginx, use `configuration-snippet: proxy_set_header X-Auth-Method "";`. With Traefik, use a Headers middleware with `customRequestHeaders: { X-Auth-Method: "" }`.
 
 ## API Endpoints
 

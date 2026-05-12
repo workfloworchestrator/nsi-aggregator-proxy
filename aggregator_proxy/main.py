@@ -23,9 +23,10 @@ from contextlib import asynccontextmanager
 import httpx
 import structlog
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from aggregator_proxy.auth import OIDCProvider, get_authenticated_user
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.nsi_client import create_nsi_client
 from aggregator_proxy.reservation_store import ReservationStore
@@ -54,6 +55,56 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.nsi_client = create_nsi_client()
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = ReservationStore()
+    if settings.auth_enabled and settings.oidc_issuer:
+        app.state.oidc_http_client = httpx.AsyncClient()
+        jwks_uri = settings.oidc_jwks_uri
+        userinfo_uri = settings.oidc_userinfo_uri
+
+        if not jwks_uri or not userinfo_uri:
+            oidc_config_url = f"{settings.oidc_issuer.rstrip('/')}/.well-known/openid-configuration"
+            logger.info("Discovering OIDC configuration", url=oidc_config_url)
+            resp = await app.state.oidc_http_client.get(oidc_config_url)
+            resp.raise_for_status()
+            oidc_config = resp.json()
+            jwks_uri = jwks_uri or oidc_config.get("jwks_uri", "")
+            userinfo_uri = userinfo_uri or oidc_config.get("userinfo_endpoint", "")
+
+        if not jwks_uri or not userinfo_uri:
+            logger.error(
+                "OIDC configuration incomplete",
+                jwks_uri=bool(jwks_uri),
+                userinfo_uri=bool(userinfo_uri),
+            )
+            raise SystemExit("OIDC requires both jwks_uri and userinfo_endpoint")
+
+        app.state.oidc_provider = OIDCProvider(
+            jwks_uri=jwks_uri,
+            userinfo_uri=userinfo_uri,
+            http_client=app.state.oidc_http_client,
+            cache_lifespan=settings.oidc_jwks_cache_lifespan,
+            userinfo_cache_ttl=settings.oidc_userinfo_cache_ttl,
+        )
+        logger.info(
+            "OIDC authentication enabled",
+            issuer=settings.oidc_issuer,
+            audience=settings.oidc_audience,
+            jwks_uri=jwks_uri,
+            userinfo_uri=userinfo_uri,
+        )
+    else:
+        app.state.oidc_provider = None
+        app.state.oidc_http_client = None
+
+    if settings.auth_enabled:
+        methods = []
+        if settings.oidc_issuer:
+            methods.append("OIDC")
+        if settings.mtls_header:
+            methods.append(f"mTLS (header: {settings.mtls_header})")
+        logger.info("Authentication enabled", methods=methods)
+    else:
+        logger.info("Authentication disabled")
+
     try:
         await _refresh_all_reservations(app.state.nsi_client, app.state.reservation_store)
         logger.info("Startup query completed, reservation store populated")
@@ -63,6 +114,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()
     await app.state.callback_client.aclose()
+    if app.state.oidc_http_client:
+        await app.state.oidc_http_client.aclose()
 
 
 app = FastAPI(
@@ -73,7 +126,8 @@ app = FastAPI(
     root_path=settings.root_path,
 )
 
-app.include_router(reservations.router)
+_auth_deps = [Depends(get_authenticated_user)]
+app.include_router(reservations.router, dependencies=_auth_deps)
 app.include_router(nsi_callback_router)
 
 

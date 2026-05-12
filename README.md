@@ -179,6 +179,29 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 | `AGGREGATOR_PROXY_PORT` | `8080` | Bind port |
 | `AGGREGATOR_PROXY_ROOT_PATH` | _(empty)_ | ASGI root path prefix. Set when serving behind a reverse proxy that strips a path prefix (e.g. `/aggregator-proxy`). Ensures Swagger UI loads the OpenAPI spec from the correct URL. Does not affect route matching. |
 
+### Authentication (optional)
+
+The Aggregator Proxy supports two authentication methods: **OIDC** (JWT from oauth2-proxy) and **mTLS** (header from nsi-auth). Authentication is **disabled by default**. When enabled, every request to `/reservations` endpoints must be authenticated via at least one method. The `/health` and `/nsi/v2/callback` endpoints are always unauthenticated.
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGGREGATOR_PROXY_AUTH_ENABLED` | `false` | Enable authentication on all reservation endpoints. When `true`, every request must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). |
+| `AGGREGATOR_PROXY_MTLS_HEADER` | _(empty)_ | Header name that nsi-auth sets on successful validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication. |
+| `AGGREGATOR_PROXY_OIDC_ISSUER` | _(empty)_ | Expected `iss` claim in the JWT. OIDC validation is active when this is set and auth is enabled. |
+| `AGGREGATOR_PROXY_OIDC_AUDIENCE` | _(empty)_ | Expected `aud` claim in the JWT. |
+| `AGGREGATOR_PROXY_OIDC_JWKS_URI` | _(empty)_ | JWKS endpoint URL. Auto-discovered from `{OIDC_ISSUER}/.well-known/openid-configuration` if empty. |
+| `AGGREGATOR_PROXY_OIDC_USERINFO_URI` | _(empty)_ | Userinfo endpoint URL. Auto-discovered from the OIDC configuration if empty. |
+| `AGGREGATOR_PROXY_OIDC_GROUP_CLAIM` | `eduperson_entitlement` | Claim name in the userinfo response that contains group memberships. |
+| `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | `[]` | Groups required for access. Supports comma-separated (`g1,g2`) or JSON array (`["g1","g2"]`). Use `[]` for no group check. **Note:** pydantic-settings JSON-parses `list` env vars, so an empty string will cause a startup error — always use `[]` instead. |
+| `AGGREGATOR_PROXY_OIDC_JWKS_CACHE_LIFESPAN` | `300` | JWKS key cache TTL in seconds. |
+| `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | `60` | Userinfo response cache TTL in seconds. |
+
+**Authentication flow** when `AUTH_ENABLED=true`:
+
+1. **OIDC path** (if `OIDC_ISSUER` is set): Check for a JWT in the `Authorization: Bearer` header, falling back to `X-Auth-Request-Access-Token` (set by oauth2-proxy). If a token is present, validate it for signature, issuer, audience, and expiry.
+2. **mTLS path** (if `MTLS_HEADER` is set): Check for the configured header (e.g. `X-Auth-Method`). This header is set by nsi-auth and forwarded by nginx via `auth-response-headers`.
+3. **Neither**: If no valid credentials are found, the request is rejected with 401.
+
 ## API Endpoints
 
 ### POST /reservations

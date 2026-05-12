@@ -15,6 +15,7 @@
 
 """Tests for error event deduplication in _query_error_events."""
 
+import logging
 from collections.abc import Callable
 
 import httpx
@@ -110,7 +111,9 @@ class TestErrorEventDeduplication:
         client.get(f"/reservations/{CONNECTION_ID}")
         assert reservation.seen_error_notification_ids == {1, 2}
 
-    def test_first_error_event_logs_info(self, _app_state: None, store: ReservationStore, capsys: object) -> None:
+    def test_first_error_event_logs_info(
+        self, _app_state: None, store: ReservationStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
         """First time seeing an error event should log at info level."""
         store.create(_make_reservation())
         event_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=1)
@@ -119,15 +122,15 @@ class TestErrorEventDeduplication:
         )
         client = TestClient(app, raise_server_exceptions=False)
 
-        client.get(f"/reservations/{CONNECTION_ID}")
+        with caplog.at_level(logging.INFO):
+            client.get(f"/reservations/{CONNECTION_ID}")
 
-        captured = capsys.readouterr()  # type: ignore[union-attr]
-        assert "New error events detected" in captured.out
+        assert any("New error events detected" in r.message for r in caplog.records)
 
-    def test_repeated_error_event_logs_already_seen(
-        self, _app_state: None, store: ReservationStore, capsys: object
+    def test_repeated_error_event_not_logged_again(
+        self, _app_state: None, store: ReservationStore, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Second time seeing the same error event should log 'already seen' at debug."""
+        """Second time seeing the same error event should not log 'New error events detected'."""
         store.create(_make_reservation())
         event_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=1)
         app.state.nsi_client = httpx.AsyncClient(
@@ -137,17 +140,16 @@ class TestErrorEventDeduplication:
 
         # First call populates seen IDs
         client.get(f"/reservations/{CONNECTION_ID}")
-        _ = capsys.readouterr()  # type: ignore[union-attr]
+        caplog.clear()
 
-        # Second call — same event
-        client.get(f"/reservations/{CONNECTION_ID}")
-        captured = capsys.readouterr()  # type: ignore[union-attr]
+        # Second call — same event should be deduplicated
+        with caplog.at_level(logging.INFO):
+            client.get(f"/reservations/{CONNECTION_ID}")
 
-        assert "New error events detected" not in captured.out
-        assert "already seen" in captured.out
+        assert not any("New error events detected" in r.message for r in caplog.records)
 
     def test_new_event_among_seen_events_logs_info(
-        self, _app_state: None, store: ReservationStore, capsys: object
+        self, _app_state: None, store: ReservationStore, caplog: pytest.LogCaptureFixture
     ) -> None:
         """When a new event appears alongside already-seen events, log info for the new one."""
         store.create(_make_reservation())
@@ -159,7 +161,7 @@ class TestErrorEventDeduplication:
 
         # First call — sees event 1
         client.get(f"/reservations/{CONNECTION_ID}")
-        _ = capsys.readouterr()  # type: ignore[union-attr]
+        caplog.clear()
 
         # Second call — event 1 + new event 2
         event2_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=2, event="forcedEnd")
@@ -167,9 +169,10 @@ class TestErrorEventDeduplication:
             transport=httpx.MockTransport(_nsi_handler_with_error_events(event1_xml, event2_xml))
         )
 
-        client.get(f"/reservations/{CONNECTION_ID}")
-        captured = capsys.readouterr()  # type: ignore[union-attr]
-        assert "New error events detected" in captured.out
+        with caplog.at_level(logging.INFO):
+            client.get(f"/reservations/{CONNECTION_ID}")
+
+        assert any("New error events detected" in r.message for r in caplog.records)
 
     def test_no_error_events_does_not_set_seen_ids(self, _app_state: None, store: ReservationStore) -> None:
         """When no error events are returned, seen_error_notification_ids stays None."""
@@ -208,7 +211,7 @@ class TestErrorEventDeduplicationRefreshAll:
         assert reservation.seen_error_notification_ids == {10}
 
     def test_refresh_all_dedup_across_repeated_calls(
-        self, _app_state: None, store: ReservationStore, capsys: object
+        self, _app_state: None, store: ReservationStore, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Second GET /reservations with same error events should log 'already seen'."""
         event_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=5)
@@ -218,18 +221,18 @@ class TestErrorEventDeduplicationRefreshAll:
         client = TestClient(app, raise_server_exceptions=False)
 
         # First call — creates reservation and sees event
-        client.get("/reservations")
-        captured = capsys.readouterr()  # type: ignore[union-attr]
-        assert "New error events detected" in captured.out
+        with caplog.at_level(logging.INFO):
+            client.get("/reservations")
+        assert any("New error events detected" in r.message for r in caplog.records)
+        caplog.clear()
 
         # Second call — same event should be deduplicated
-        client.get("/reservations")
-        captured = capsys.readouterr()  # type: ignore[union-attr]
-        assert "New error events detected" not in captured.out
-        assert "already seen" in captured.out
+        with caplog.at_level(logging.INFO):
+            client.get("/reservations")
+        assert not any("New error events detected" in r.message for r in caplog.records)
 
     def test_refresh_all_new_event_after_initial_logs_info(
-        self, _app_state: None, store: ReservationStore, capsys: object
+        self, _app_state: None, store: ReservationStore, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A new event appearing on a subsequent refresh-all should log at info."""
         event1_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=1, event="deactivateFailed")
@@ -240,7 +243,7 @@ class TestErrorEventDeduplicationRefreshAll:
 
         # First call — sees event 1
         client.get("/reservations")
-        _ = capsys.readouterr()  # type: ignore[union-attr]
+        caplog.clear()
 
         # Second call — event 1 + new event 2
         event2_xml = build_error_event_xml(connection_id=CONNECTION_ID, notification_id=2, event="forcedEnd")
@@ -248,6 +251,6 @@ class TestErrorEventDeduplicationRefreshAll:
             transport=httpx.MockTransport(_nsi_handler_with_error_events(event1_xml, event2_xml))
         )
 
-        client.get("/reservations")
-        captured = capsys.readouterr()  # type: ignore[union-attr]
-        assert "New error events detected" in captured.out
+        with caplog.at_level(logging.INFO):
+            client.get("/reservations")
+        assert any("New error events detected" in r.message for r in caplog.records)

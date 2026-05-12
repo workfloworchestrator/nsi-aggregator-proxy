@@ -181,7 +181,7 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 
 ### Authentication (optional)
 
-The Aggregator Proxy supports two authentication methods: **OIDC** (JWT from oauth2-proxy) and **mTLS** (header from nsi-auth). Authentication is **disabled by default**. When enabled, every request to `/reservations` endpoints must be authenticated via at least one method. The `/health` and `/nsi/v2/callback` endpoints are always unauthenticated.
+The Aggregator Proxy supports two authentication methods: **OIDC** (JWT from oauth2-proxy) and **mTLS** (header from nsi-auth). Authentication is **disabled by default**. When enabled, every request to `/reservations` endpoints must be authenticated via at least one method. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires **mTLS only** (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the NSI aggregator is a machine client that authenticates via mutual TLS, not browser-based OIDC.
 
 | Variable | Default | Description |
 |---|---|---|

@@ -462,11 +462,52 @@ class TestHealthWithAuth:
 
 
 class TestCallbackWithAuth:
-    def test_callback_accessible_without_token(self, auth_api):
-        """The NSI callback endpoint must not require authentication."""
+    def test_callback_accessible_without_token_oidc_only(self, auth_api):
+        """With OIDC-only config (no mtls_header), callback does not require auth."""
         client, _ = auth_api
         resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
         assert resp.status_code != 401
+
+    def test_callback_requires_mtls_header(self, mock_oidc_provider):
+        """When mTLS is configured and auth enabled, callback rejects without the header."""
+        with _dual_auth_client(mock_oidc_provider) as client:
+            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
+            assert resp.status_code == 401
+
+    def test_callback_accepts_mtls_header(self, mock_oidc_provider):
+        """When mTLS header is present, callback is accessible."""
+        with _dual_auth_client(mock_oidc_provider) as client:
+            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>", headers={"X-Auth-Method": "mTLS"})
+            assert resp.status_code != 401
+
+    def test_callback_does_not_accept_jwt(self, mock_oidc_provider, make_token):
+        """JWT alone is not sufficient for callback — only mTLS is checked."""
+        with _dual_auth_client(mock_oidc_provider) as client:
+            resp = client.post(
+                "/nsi/v2/callback",
+                content=b"<not-xml/>",
+                headers={"Authorization": f"Bearer {make_token()}"},
+            )
+            assert resp.status_code == 401
+
+    def test_callback_passthrough_when_auth_disabled(self):
+        """When auth is disabled, callback is accessible without any headers."""
+        with (
+            patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            _mock_app_state(app)
+            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
+            assert resp.status_code != 401
+
+    def test_callback_mtls_only_config(self):
+        """mTLS-only config (no OIDC): callback requires mTLS header."""
+        with _mtls_only_client() as client:
+            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
+            assert resp.status_code == 401
+
+            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>", headers={"X-Auth-Method": "mTLS"})
+            assert resp.status_code != 401
 
 
 # ---------------------------------------------------------------------------

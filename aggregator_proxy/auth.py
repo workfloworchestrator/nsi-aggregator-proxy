@@ -215,3 +215,22 @@ async def get_authenticated_user(request: Request) -> dict[str, Any] | None:
     # --- Neither succeeded ---
     log.warning("No valid authentication credentials found", path=path)
     raise HTTPException(status_code=401, detail="Authentication required", headers=_WWW_AUTHENTICATE)
+
+
+async def get_mtls_authenticated_callback(request: Request) -> None:
+    """FastAPI dependency that requires mTLS authentication on the NSI callback endpoint.
+
+    When ``auth_enabled`` is ``False`` or ``mtls_header`` is empty, all requests pass through.
+    When both are set, the request must carry the mTLS header set by nsi-auth.
+    """
+    if not settings.auth_enabled or not settings.mtls_header:
+        return
+
+    mtls_value = request.headers.get(settings.mtls_header, "").strip()
+    if mtls_value:
+        client_dn = request.headers.get("X-Client-DN", "unknown")
+        log.info("Callback mTLS authentication verified", client_dn=client_dn, path=request.url.path)
+        return
+
+    log.warning("Callback rejected: missing mTLS header", path=request.url.path)
+    raise HTTPException(status_code=401, detail="mTLS authentication required")

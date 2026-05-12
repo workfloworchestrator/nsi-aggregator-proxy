@@ -26,7 +26,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from aggregator_proxy.auth import OIDCProvider, get_authenticated_user
+from aggregator_proxy.auth import OIDCProvider, get_authenticated_user, get_mtls_authenticated_callback
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.nsi_client import create_nsi_client
 from aggregator_proxy.reservation_store import ReservationStore
@@ -127,8 +127,9 @@ app = FastAPI(
 )
 
 _auth_deps = [Depends(get_authenticated_user)]
+_callback_auth_deps = [Depends(get_mtls_authenticated_callback)]
 app.include_router(reservations.router, dependencies=_auth_deps)
-app.include_router(nsi_callback_router)
+app.include_router(nsi_callback_router, dependencies=_callback_auth_deps)
 
 
 @app.exception_handler(httpx.HTTPStatusError)

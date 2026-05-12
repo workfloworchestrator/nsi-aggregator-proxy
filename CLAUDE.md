@@ -47,7 +47,7 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 - **Shared client via app state**: the `httpx.AsyncClient` is created at startup in the `lifespan` context manager (`main.py`) and stored in `app.state.nsi_client`. Routers access it through the `get_nsi_client` FastAPI dependency (`dependencies.py`).
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
 - **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL`, `AGGREGATOR_PROXY_REQUESTER_NSA`, `AGGREGATOR_PROXY_PROVIDER_NSA`, and `AGGREGATOR_PROXY_BASE_URL`.
-- **Dual-ingress authentication**: when `AUTH_ENABLED=true`, every request to `/reservations` must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). OIDC is active when `OIDC_ISSUER` is set; mTLS is active when `MTLS_HEADER` is set. The `/health` and `/nsi/v2/callback` endpoints are always unauthenticated. OIDC discovery validates that both `jwks_uri` and `userinfo_endpoint` are available, failing fast at startup if not. Group-based authorization via userinfo endpoint. Separate vanilla httpx client for OIDC calls (not the mTLS NSI client). `OIDC_REQUIRED_GROUPS` must be `[]` (not empty string) when no groups are required.
+- **Dual-ingress authentication**: when `AUTH_ENABLED=true`, every request to `/reservations` must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). OIDC is active when `OIDC_ISSUER` is set; mTLS is active when `MTLS_HEADER` is set. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires mTLS (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the aggregator is a machine client, not a browser user. OIDC discovery validates that both `jwks_uri` and `userinfo_endpoint` are available, failing fast at startup if not. Group-based authorization via userinfo endpoint. Separate vanilla httpx client for OIDC calls (not the mTLS NSI client). `OIDC_REQUIRED_GROUPS` must be `[]` (not empty string) when no groups are required.
 
 ### Module layout
 
@@ -55,7 +55,8 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 aggregator_proxy/
   main.py               # FastAPI app, lifespan, entry point (run()), /health endpoint
   settings.py           # pydantic-settings config (env prefix: AGGREGATOR_PROXY_)
-  auth.py               # OIDC JWT + mTLS authentication (get_authenticated_user dependency)
+  auth.py               # OIDC JWT + mTLS authentication (get_authenticated_user,
+                        #   get_mtls_authenticated_callback dependencies)
   models.py             # Pydantic request/response models and ReservationStatus enum
   reservation_store.py  # In-memory reservation store and pending NSI correlation tracking
   state_mapping.py      # Maps NSI sub-state machines to proxy ReservationStatus

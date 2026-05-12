@@ -116,9 +116,7 @@ async def validate_token(token: str, oidc_provider: OIDCProvider) -> dict[str, A
     return payload
 
 
-def check_groups(
-    userinfo: dict[str, Any], required_groups: list[str], group_claim: str
-) -> list[str]:
+def check_groups(userinfo: dict[str, Any], required_groups: list[str], group_claim: str) -> list[str]:
     """Verify that the user belongs to at least one of the required groups."""
     user_groups = userinfo.get(group_claim, [])
     if isinstance(user_groups, str):

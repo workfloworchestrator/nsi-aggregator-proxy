@@ -15,6 +15,7 @@
 
 """Application settings loaded from environment variables."""
 
+import json
 from pathlib import Path
 
 from pydantic import field_validator
@@ -68,6 +69,32 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104
     port: int = 8080
     root_path: str = ""
+
+    auth_enabled: bool = False
+    mtls_header: str = ""
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_uri: str = ""
+    oidc_userinfo_uri: str = ""
+    oidc_group_claim: str = "eduperson_entitlement"
+    oidc_required_groups: list[str] = []
+    oidc_jwks_cache_lifespan: int = 300
+    oidc_userinfo_cache_ttl: int = 60
+
+    @field_validator("oidc_required_groups", mode="before")
+    @classmethod
+    def parse_comma_separated_groups(cls, v: object) -> object:
+        """Accept both JSON arrays and comma-separated strings."""
+        if not isinstance(v, str):
+            return v
+        if not v:
+            return []
+        if v.startswith("["):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in OIDC_REQUIRED_GROUPS: {e}") from e
+        return [g.strip() for g in v.split(",") if g.strip()]
 
 
 settings = Settings()  # type: ignore[call-arg]

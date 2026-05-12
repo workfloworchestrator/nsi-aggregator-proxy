@@ -37,7 +37,7 @@ requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
     { name = "lxml", specifier = "==6.1.0" },
     { name = "pydantic-settings", specifier = "==2.14.0" },
-    { name = "pyjwt", extras = ["crypto"], specifier = "==2.10.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = "==2.12.0" },
     { name = "structlog", specifier = "==25.5.0" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.46.0" },
 ]
@@ -828,11 +828,11 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.10.0"
+version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b5/05/324952ded002de746f87b21066b9373080bb5058f64cf01c4d62784b8186/pyjwt-2.10.0.tar.gz", hash = "sha256:7628a7eb7938959ac1b26e819a1df0fd3259505627b575e4bad6d08f76db695c", size = 87687, upload-time = "2024-11-17T10:19:49.26Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/10/e8192be5f38f3e8e7e046716de4cae33d56fd5ae08927a823bb916be36c1/pyjwt-2.12.0.tar.gz", hash = "sha256:2f62390b667cd8257de560b850bb5a883102a388829274147f1d724453f8fb02", size = 102511, upload-time = "2026-03-12T17:15:30.831Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6f/1d/ef9b066e7ef60494c94173dc9f0b9adf5d9ec5f888109f5c669f53d4144b/PyJWT-2.10.0-py3-none-any.whl", hash = "sha256:543b77207db656de204372350926bed5a86201c4cbff159f623f79c7bb487a15", size = 23002, upload-time = "2024-11-17T10:19:46.81Z" },
+    { url = "https://files.pythonhosted.org/packages/15/70/70f895f404d363d291dcf62c12c85fdd47619ad9674ac0f53364d035925a/pyjwt-2.12.0-py3-none-any.whl", hash = "sha256:9bb459d1bdd0387967d287f5656bf7ec2b9a26645d1961628cda1764e087fd6e", size = 29700, upload-time = "2026-03-12T17:15:29.257Z" },
 ]
 
 [package.optional-dependencies]

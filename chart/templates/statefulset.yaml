@@ -49,6 +49,18 @@ spec:
             - configMapRef:
                 name: {{ .Release.Name }}-environment
           {{- end }}
+          {{- with .Values.envFromSecret }}
+          env:
+            {{- range . }}
+            {{- if .secretName }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .key }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

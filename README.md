@@ -148,7 +148,7 @@ helm install nsi-aggregator-proxy ./chart \
   --set env.AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com
 ```
 
-The chart supports Ingress and Gateway API HTTPRoute for external access. See `chart/values.yaml` for all available options including mTLS certificate mounting via volumes and volume mounts.
+The chart supports Ingress and Gateway API HTTPRoute for external access, and the `envFromSecret` value lets you bind any `AGGREGATOR_PROXY_*` environment variable to a Kubernetes Secret key (entries with an empty `secretName` are skipped, so the list can be safely templated per environment). See `chart/values.yaml` for all available options including mTLS certificate mounting via volumes and volume mounts.
 
 ## Configuration
 

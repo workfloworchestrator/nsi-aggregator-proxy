@@ -34,6 +34,14 @@ fullnameOverride: ""
 #  AGGREGATOR_PROXY_HOST: 0.0.0.0
 #  AGGREGATOR_PROXY_PORT: "8080"
 
+# Environment variables sourced from Kubernetes Secret keys. Each entry maps an
+# env var name to a (secretName, key) pair. Entries with an empty secretName are
+# skipped, so this list can be safely templated from per-environment values.
+envFromSecret: []
+  # - name: AGGREGATOR_PROXY_OIDC_AUDIENCE
+  #   secretName: shared-oidc-secret
+  #   key: client-id
+
 # This section builds out the service account more information can be found here: https://kubernetes.io/docs/concepts/security/service-accounts/
 serviceAccount:
   # Specifies whether a service account should be created.

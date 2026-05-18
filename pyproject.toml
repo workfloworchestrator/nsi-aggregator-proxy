@@ -17,7 +17,7 @@ dependencies = [
     "fastapi[standard]==0.136.1",
     "httpx==0.28.1",
     "lxml==6.1.0",
-    "pydantic-settings==2.14.0",
+    "pydantic-settings==2.14.1",
     "PyJWT[crypto]==2.12.1",
     "structlog==25.5.0",
     "uvicorn[standard]==0.46.0",

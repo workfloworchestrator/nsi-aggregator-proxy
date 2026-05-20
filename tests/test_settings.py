@@ -94,3 +94,23 @@ def test_env_file_read_as_utf8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_env_file_encoding_configured() -> None:
     """The Settings model is configured to read env files as UTF-8."""
     assert Settings.model_config.get("env_file_encoding") == "utf-8"
+
+
+def test_mcp_settings_defaults() -> None:
+    """MCP settings default to disabled with the standard /mcp path."""
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mcp_enabled is False
+    assert s.mcp_path == "/mcp"
+    assert s.mcp_auth_enabled is False
+
+
+def test_mcp_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP settings can be overridden via AGGREGATOR_PROXY_MCP_* env vars."""
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_ENABLED", "true")
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_PATH", "/custom-mcp")
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_AUTH_ENABLED", "true")
+
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mcp_enabled is True
+    assert s.mcp_path == "/custom-mcp"
+    assert s.mcp_auth_enabled is True

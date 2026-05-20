@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     oidc_jwks_cache_lifespan: int = 300
     oidc_userinfo_cache_ttl: int = 60
 
+    mcp_enabled: bool = False
+    mcp_path: str = "/mcp"
+    mcp_auth_enabled: bool = False
+
     @field_validator("oidc_required_groups", mode="before")
     @classmethod
     def parse_comma_separated_groups(cls, v: object) -> object:

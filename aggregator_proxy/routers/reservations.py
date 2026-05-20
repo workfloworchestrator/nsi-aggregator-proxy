@@ -1074,6 +1074,7 @@ def _build_reservation_detail(
     "/{connectionId}",
     response_model=ReservationDetail,
     summary="Get reservation details",
+    operation_id="get_reservation",
 )
 async def get_reservation(
     connectionId: str,
@@ -1101,6 +1102,7 @@ async def get_reservation(
     "",
     response_model=ReservationsListResponse,
     summary="List all reservations",
+    operation_id="list_reservations",
 )
 async def list_reservations(
     nsi_client: NsiClient,

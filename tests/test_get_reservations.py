@@ -344,3 +344,12 @@ class TestListReservationsDetailParameter:
         assert resp.status_code == 200
         for r in resp.json()["reservations"]:
             assert r["segments"] is None
+
+
+def test_reservation_get_routes_have_explicit_operation_ids() -> None:
+    """Operation IDs are used as MCP component names and must be stable, clean strings."""
+    schema = app.openapi()
+    list_op = schema["paths"]["/reservations"]["get"]["operationId"]
+    detail_op = schema["paths"]["/reservations/{connectionId}"]["get"]["operationId"]
+    assert list_op == "list_reservations"
+    assert detail_op == "get_reservation"

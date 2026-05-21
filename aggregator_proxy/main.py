@@ -145,6 +145,35 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
+from fastmcp.utilities.lifespan import combine_lifespans  # noqa: E402
+
+from aggregator_proxy.mcp_server import build_mcp  # noqa: E402
+
+
+def _validate_mcp_settings() -> None:
+    """Refuse to start when MCP/REST auth flags are inconsistent.
+
+    Raises:
+        SystemExit: If REST auth is enabled but MCP auth is not, or if MCP auth
+            is enabled without an explicit OIDC JWKS URI. Auto-discovery is not
+            available at module load time, so the JWKS URI must be set explicitly
+            when MCP auth is enabled.
+    """
+    if settings.auth_enabled and not settings.mcp_auth_enabled:
+        raise SystemExit("AGGREGATOR_PROXY_MCP_AUTH_ENABLED must be true when AGGREGATOR_PROXY_AUTH_ENABLED is true")
+    if settings.mcp_auth_enabled and not settings.oidc_jwks_uri:
+        raise SystemExit("AGGREGATOR_PROXY_OIDC_JWKS_URI must be set explicitly when MCP_AUTH_ENABLED is true")
+
+
+if settings.mcp_enabled:
+    _validate_mcp_settings()
+
+    mcp_app = build_mcp(app).http_app(path="/")
+    original_lifespan = app.router.lifespan_context
+    app.router.lifespan_context = combine_lifespans(original_lifespan, mcp_app.lifespan)
+    app.mount(settings.mcp_path, mcp_app)
+
+
 def run() -> None:
     """Entry point invoked by the ``aggregator-proxy`` CLI command."""
     uvicorn.run(

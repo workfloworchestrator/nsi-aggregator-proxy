@@ -170,3 +170,58 @@ async def test_mcp_has_no_auth_provider_when_mcp_auth_disabled(monkeypatch: pyte
     mcp = mcp_server.build_mcp(app)
 
     assert mcp.auth is None
+
+
+def test_startup_rejects_auth_enabled_without_mcp_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If REST auth is on but MCP auth is off, startup must refuse.
+
+    We call ``_validate_mcp_settings`` directly rather than reloading the
+    ``aggregator_proxy.main`` module: ``importlib.reload`` replaces the global
+    ``settings`` instance and ``app`` object, but the routers (imported once at
+    module load) keep references to the original ``settings`` instance, which
+    causes hard-to-debug test pollution across the suite.
+    """
+    from aggregator_proxy.main import _validate_mcp_settings
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "mcp_auth_enabled", False)
+
+    with pytest.raises(SystemExit, match="AGGREGATOR_PROXY_MCP_AUTH_ENABLED"):
+        _validate_mcp_settings()
+
+
+def test_startup_rejects_mcp_auth_without_explicit_jwks_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP auth requires explicit OIDC_JWKS_URI (no lifespan auto-discovery available at module load)."""
+    from aggregator_proxy.main import _validate_mcp_settings
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "mcp_auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_jwks_uri", "")
+
+    with pytest.raises(SystemExit, match="AGGREGATOR_PROXY_OIDC_JWKS_URI"):
+        _validate_mcp_settings()
+
+
+def test_validate_mcp_settings_accepts_valid_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When auth_enabled, mcp_auth_enabled, and oidc_jwks_uri are all set, validation passes."""
+    from aggregator_proxy.main import _validate_mcp_settings
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "mcp_auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_jwks_uri", "https://idp.example.com/jwks")
+
+    _validate_mcp_settings()
+
+
+def test_mcp_path_returns_404_when_disabled() -> None:
+    """When mcp_enabled=false (the default in tests), the /mcp path is not mounted."""
+    from fastapi.testclient import TestClient
+
+    from aggregator_proxy.main import app
+
+    with TestClient(app) as client:
+        response = client.get("/mcp")
+    assert response.status_code == 404

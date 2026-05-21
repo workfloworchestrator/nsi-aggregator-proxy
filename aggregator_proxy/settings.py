@@ -100,5 +100,15 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid JSON in OIDC_REQUIRED_GROUPS: {e}") from e
         return [g.strip() for g in v.split(",") if g.strip()]
 
+    @field_validator("mcp_path")
+    @classmethod
+    def validate_mcp_path(cls, v: str) -> str:
+        """Require a leading slash and reject trailing slash so app.mount behaves predictably."""
+        if not v.startswith("/"):
+            raise ValueError("AGGREGATOR_PROXY_MCP_PATH must start with '/'")
+        if len(v) > 1 and v.endswith("/"):
+            raise ValueError("AGGREGATOR_PROXY_MCP_PATH must not end with '/'")
+        return v
+
 
 settings = Settings()  # type: ignore[call-arg]

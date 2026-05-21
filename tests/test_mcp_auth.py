@@ -210,6 +210,25 @@ def test_startup_rejects_mcp_auth_without_explicit_jwks_uri(monkeypatch: pytest.
         _validate_mcp_settings()
 
 
+def test_startup_rejects_mcp_auth_with_required_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP auth with non-empty OIDC_REQUIRED_GROUPS is rejected because group checks cannot succeed.
+
+    JWTVerifier doesn't call userinfo, and the token-forwarding hook only forwards
+    ``Authorization`` — not ``X-Auth-Request-Access-Token``. ``get_authenticated_user``
+    would always 401 on the internal call, so fail at startup with a clear message.
+    """
+    from aggregator_proxy.main import _validate_mcp_settings
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "mcp_auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_jwks_uri", "https://idp.example.com/jwks")
+    monkeypatch.setattr(settings, "oidc_required_groups", ["urn:example:group"])
+
+    with pytest.raises(SystemExit, match="AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS"):
+        _validate_mcp_settings()
+
+
 def test_validate_mcp_settings_accepts_valid_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """When auth_enabled, mcp_auth_enabled, and oidc_jwks_uri are all set, validation passes."""
     from aggregator_proxy.main import _validate_mcp_settings
@@ -218,6 +237,7 @@ def test_validate_mcp_settings_accepts_valid_config(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "mcp_auth_enabled", True)
     monkeypatch.setattr(settings, "oidc_jwks_uri", "https://idp.example.com/jwks")
+    monkeypatch.setattr(settings, "oidc_required_groups", [])
 
     _validate_mcp_settings()
 

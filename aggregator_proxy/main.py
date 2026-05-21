@@ -151,16 +151,26 @@ def _validate_mcp_settings() -> None:
     """Refuse to start when MCP/REST auth flags are inconsistent.
 
     Raises:
-        SystemExit: If REST auth is enabled but MCP auth is not, or if MCP auth
-            is enabled without an explicit OIDC JWKS URI. Auto-discovery is not
-            available at module load time, so the JWKS URI must be set explicitly
-            when MCP auth is enabled.
+        SystemExit: If REST auth is enabled but MCP auth is not, if MCP auth
+            is enabled without an explicit OIDC JWKS URI, or if MCP auth is
+            enabled while OIDC group authorization is required. FastMCP's
+            ``JWTVerifier`` validates the token but does not call the userinfo
+            endpoint, and the token-forwarding event hook only forwards the
+            ``Authorization`` header — not the ``X-Auth-Request-Access-Token``
+            header that ``get_authenticated_user`` requires for the userinfo
+            group lookup. The internal call would therefore always 401, so we
+            fail fast instead.
     """
     if settings.auth_enabled and not settings.mcp_auth_enabled:
         raise SystemExit("AGGREGATOR_PROXY_MCP_AUTH_ENABLED must be true when AGGREGATOR_PROXY_AUTH_ENABLED is true")
     if settings.mcp_auth_enabled and not settings.oidc_jwks_uri:
         raise SystemExit(
             "AGGREGATOR_PROXY_OIDC_JWKS_URI must be set explicitly when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true"
+        )
+    if settings.mcp_auth_enabled and settings.oidc_required_groups:
+        raise SystemExit(
+            "AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS must be empty when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true; "
+            "group-based authorization is not enforced on the MCP endpoint"
         )
 
 

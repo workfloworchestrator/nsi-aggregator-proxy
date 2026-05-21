@@ -340,10 +340,14 @@ All state-changing operations (POST, DELETE) and the NSI callback endpoint are e
 | Variable | Default | Description |
 |---|---|---|
 | `AGGREGATOR_PROXY_MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
-| `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. |
-| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the configured OIDC issuer, audience, and JWKS URI. Group-based authorization (`OIDC_REQUIRED_GROUPS`) is not enforced on the MCP endpoint. |
+| `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and must not end with `/`. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the configured OIDC issuer, audience, and JWKS URI. Group-based authorization (`OIDC_REQUIRED_GROUPS`) is not supported on the MCP endpoint; see startup validation below. |
 
-**Startup validation:** when `AUTH_ENABLED=true`, `MCP_AUTH_ENABLED` must also be `true` — otherwise the proxy would expose authenticated data via an unauthenticated MCP endpoint. The proxy refuses to start in that configuration. Additionally, when `MCP_AUTH_ENABLED=true`, `OIDC_JWKS_URI` must be set explicitly (auto-discovery is not available at module load time).
+**Startup validation:** the proxy refuses to start when any of these hold:
+
+- `AUTH_ENABLED=true` and `MCP_AUTH_ENABLED=false` — would expose authenticated data via an unauthenticated MCP endpoint.
+- `MCP_AUTH_ENABLED=true` and `OIDC_JWKS_URI` empty — OIDC discovery only runs in the async lifespan, but `JWTVerifier` needs the JWKS URI at module load time.
+- `MCP_AUTH_ENABLED=true` and `OIDC_REQUIRED_GROUPS` non-empty — `JWTVerifier` validates the JWT but does not call the userinfo endpoint, and only the `Authorization` header is forwarded to the internal `/reservations` call. The userinfo group lookup in `get_authenticated_user` would therefore never succeed, so the combination is rejected explicitly rather than producing opaque 401s at request time.
 
 ### Minimal client example
 

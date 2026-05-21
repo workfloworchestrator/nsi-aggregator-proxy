@@ -196,7 +196,6 @@ def test_startup_rejects_mcp_auth_without_explicit_jwks_uri(monkeypatch: pytest.
     from aggregator_proxy.main import _validate_mcp_settings
     from aggregator_proxy.settings import settings
 
-    monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "mcp_auth_enabled", True)
     monkeypatch.setattr(settings, "oidc_jwks_uri", "")
 
@@ -219,8 +218,6 @@ def test_validate_mcp_settings_accepts_valid_config(monkeypatch: pytest.MonkeyPa
 def test_mcp_path_returns_404_when_disabled() -> None:
     """When mcp_enabled=false (the default in tests), the /mcp path is not mounted."""
     from fastapi.testclient import TestClient
-
-    from aggregator_proxy.main import app
 
     with TestClient(app) as client:
         response = client.get("/mcp")

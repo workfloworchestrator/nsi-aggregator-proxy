@@ -341,7 +341,7 @@ All state-changing operations (POST, DELETE) and the NSI callback endpoint are e
 |---|---|---|
 | `AGGREGATOR_PROXY_MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
 | `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. |
-| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the same `OIDC_*` settings as the REST endpoints. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the configured OIDC issuer, audience, and JWKS URI. Group-based authorization (`OIDC_REQUIRED_GROUPS`) is not enforced on the MCP endpoint. |
 
 **Startup validation:** when `AUTH_ENABLED=true`, `MCP_AUTH_ENABLED` must also be `true` — otherwise the proxy would expose authenticated data via an unauthenticated MCP endpoint. The proxy refuses to start in that configuration. Additionally, when `MCP_AUTH_ENABLED=true`, `OIDC_JWKS_URI` must be set explicitly (auto-discovery is not available at module load time).
 
@@ -357,7 +357,17 @@ transport = StreamableHttpTransport(
 )
 
 async with Client(transport) as client:
-    contents = await client.read_resource("list_reservations")
+    # Discover the list resource and read it
+    resources = await client.list_resources()
+    list_resource = next(r for r in resources if r.name == "list_reservations")
+    contents = await client.read_resource(list_resource.uri)
+    print(contents[0].text)
+
+    # Or read a single reservation by filling in the URI template
+    templates = await client.list_resource_templates()
+    get_template = next(t for t in templates if t.name == "get_reservation")
+    uri = get_template.uriTemplate.replace("{connectionId}", "<your-connection-id>")
+    contents = await client.read_resource(uri)
     print(contents[0].text)
 ```
 

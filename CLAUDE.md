@@ -140,7 +140,7 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | No | `60` | Userinfo response cache TTL in seconds |
 | `AGGREGATOR_PROXY_MCP_ENABLED` | No | `false` | Mount the MCP sub-app at `MCP_PATH`. Off by default; opt-in. |
 | `AGGREGATOR_PROXY_MCP_PATH` | No | `/mcp` | Mount path for the MCP sub-app. |
-| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | No | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the same `OIDC_*` settings. Must be `true` whenever `AUTH_ENABLED=true`. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | No | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the issuer/audience/JWKS URI from the existing `OIDC_*` settings. Group-based authorization is not enforced on MCP. Must be `true` whenever `AUTH_ENABLED=true`. |
 
 ### Non-obvious invariants
 

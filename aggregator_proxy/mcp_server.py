@@ -17,16 +17,39 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import httpx
 from fastapi import FastAPI
 from fastmcp import FastMCP
+from fastmcp.server.context import request_ctx
 from fastmcp.server.providers.openapi import MCPType, RouteMap
+
+from aggregator_proxy.settings import settings
 
 _DETAIL_PATTERN = r"^/reservations/\{[^}]+\}$"
 _LIST_PATTERN = r"^/reservations$"
 
 
+async def _forward_user_token(request: httpx.Request) -> None:
+    """Copy the MCP client's Authorization header onto the internal /reservations call."""
+    ctx = request_ctx.get(None)
+    if ctx is None:
+        return
+    incoming = getattr(ctx, "request", None)
+    if incoming is None:
+        return
+    token = incoming.headers.get("authorization")
+    if token:
+        request.headers["Authorization"] = token
+
+
 def build_mcp(api: FastAPI) -> FastMCP:
     """Build a FastMCP server from the given FastAPI app, exposing only GET /reservations."""
+    httpx_kwargs: dict[str, Any] = {}
+    if settings.auth_enabled:
+        httpx_kwargs["event_hooks"] = {"request": [_forward_user_token]}
+
     return FastMCP.from_fastapi(
         app=api,
         name="NSI Aggregator Proxy",
@@ -35,4 +58,5 @@ def build_mcp(api: FastAPI) -> FastMCP:
             RouteMap(methods=["GET"], pattern=_LIST_PATTERN, mcp_type=MCPType.RESOURCE),
             RouteMap(mcp_type=MCPType.EXCLUDE),
         ],
+        httpx_client_kwargs=httpx_kwargs,
     )

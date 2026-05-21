@@ -48,6 +48,7 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
 - **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL`, `AGGREGATOR_PROXY_REQUESTER_NSA`, `AGGREGATOR_PROXY_PROVIDER_NSA`, and `AGGREGATOR_PROXY_BASE_URL`.
 - **Dual-ingress authentication**: when `AUTH_ENABLED=true`, every request to `/reservations` must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). OIDC is active when `OIDC_ISSUER` is set; mTLS is active when `MTLS_HEADER` is set. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires mTLS (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the aggregator is a machine client, not a browser user. OIDC discovery validates that both `jwks_uri` and `userinfo_endpoint` are available, failing fast at startup if not. Group-based authorization via userinfo endpoint. Separate vanilla httpx client for OIDC calls (not the mTLS NSI client). `OIDC_REQUIRED_GROUPS` must be `[]` (not empty string) when no groups are required.
+- **Optional MCP sub-app**: when `MCP_ENABLED=true`, an `aggregator_proxy/mcp_server.py` factory builds a `FastMCP.from_fastapi()` sub-app mounted at `/mcp`. Route maps expose only `GET /reservations` (Resource) and `GET /reservations/{connectionId}` (ResourceTemplate); everything else is `MCPType.EXCLUDE`. The MCP-internal call to `/reservations` runs through the existing FastAPI handlers and dependencies, so no business logic is duplicated. When `auth_enabled=true`, an httpx event hook forwards the MCP client's `Authorization` header to the internal call so the existing `get_authenticated_user` dependency re-validates.
 
 ### Module layout
 
@@ -137,6 +138,9 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | No | `[]` | Groups required for access (JSON array or comma-separated) |
 | `AGGREGATOR_PROXY_OIDC_JWKS_CACHE_LIFESPAN` | No | `300` | JWKS key cache TTL in seconds |
 | `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | No | `60` | Userinfo response cache TTL in seconds |
+| `AGGREGATOR_PROXY_MCP_ENABLED` | No | `false` | Mount the MCP sub-app at `MCP_PATH`. Off by default; opt-in. |
+| `AGGREGATOR_PROXY_MCP_PATH` | No | `/mcp` | Mount path for the MCP sub-app. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | No | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the same `OIDC_*` settings. Must be `true` whenever `AUTH_ENABLED=true`. |
 
 ### Non-obvious invariants
 

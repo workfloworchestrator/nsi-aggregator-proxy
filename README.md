@@ -324,6 +324,43 @@ When authentication is enabled, endpoints may return these error responses:
 
 **Defense-in-depth:** The OIDC ingress should strip the `X-Auth-Method` header to prevent clients from spoofing mTLS authentication. With nginx, use `configuration-snippet: proxy_set_header X-Auth-Method "";`. With Traefik, use a Headers middleware with `customRequestHeaders: { X-Auth-Method: "" }`.
 
+## MCP Endpoint (optional)
+
+The Aggregator Proxy can expose its read-only reservation endpoints as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, mounted at `/mcp`. This lets AI agents (Claude Desktop, custom agents using `fastmcp.Client`, etc.) list and inspect reservations as MCP **Resources**.
+
+Only the two GET operations are exposed:
+
+- `GET /reservations` → MCP Resource `list_reservations`
+- `GET /reservations/{connectionId}` → MCP ResourceTemplate `get_reservation`
+
+All state-changing operations (POST, DELETE) and the NSI callback endpoint are explicitly excluded from MCP.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGGREGATOR_PROXY_MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
+| `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the same `OIDC_*` settings as the REST endpoints. |
+
+**Startup validation:** when `AUTH_ENABLED=true`, `MCP_AUTH_ENABLED` must also be `true` — otherwise the proxy would expose authenticated data via an unauthenticated MCP endpoint. The proxy refuses to start in that configuration. Additionally, when `MCP_AUTH_ENABLED=true`, `OIDC_JWKS_URI` must be set explicitly (auto-discovery is not available at module load time).
+
+### Minimal client example
+
+```python
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+
+transport = StreamableHttpTransport(
+    url="https://proxy.example.com/mcp/",
+    headers={"Authorization": "Bearer <your-token>"},
+)
+
+async with Client(transport) as client:
+    contents = await client.read_resource("list_reservations")
+    print(contents[0].text)
+```
+
 ## API Endpoints
 
 ### POST /reservations

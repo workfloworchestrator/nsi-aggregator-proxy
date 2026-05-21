@@ -10,11 +10,11 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency and environmen
 # Install dependencies
 uv sync
 
-# Run the application (requires all four AGGREGATOR_PROXY_* variables below)
-AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
-  AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
-  AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
-  AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+# Run the application (requires all four variables below)
+PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  BASE_URL=https://proxy.example.com \
   uv run aggregator-proxy
 
 # Run tests
@@ -46,18 +46,23 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 - **mTLS support**: the `httpx.AsyncClient` (created in `nsi_client.py`) can be configured with a client certificate/key pair and a custom CA bundle for mutual TLS against the aggregator.
 - **Shared client via app state**: the `httpx.AsyncClient` is created at startup in the `lifespan` context manager (`main.py`) and stored in `app.state.nsi_client`. Routers access it through the `get_nsi_client` FastAPI dependency (`dependencies.py`).
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
-- **Settings**: all configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix, managed by `pydantic-settings` (`settings.py`). The required variables are `AGGREGATOR_PROXY_PROVIDER_URL`, `AGGREGATOR_PROXY_REQUESTER_NSA`, `AGGREGATOR_PROXY_PROVIDER_NSA`, and `AGGREGATOR_PROXY_BASE_URL`.
-- **Dual-ingress authentication**: when `AUTH_ENABLED=true`, every request to `/reservations` must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). OIDC is active when `OIDC_ISSUER` is set; mTLS is active when `MTLS_HEADER` is set. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires mTLS (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the aggregator is a machine client, not a browser user. OIDC discovery validates that both `jwks_uri` and `userinfo_endpoint` are available, failing fast at startup if not. Group-based authorization via userinfo endpoint. Separate vanilla httpx client for OIDC calls (not the mTLS NSI client). `OIDC_REQUIRED_GROUPS` must be `[]` (not empty string) when no groups are required.
-- **Optional MCP sub-app**: when `MCP_ENABLED=true`, an `aggregator_proxy/mcp_server.py` factory builds a `FastMCP.from_fastapi()` sub-app mounted at `/mcp`. Route maps expose only `GET /reservations` (Resource) and `GET /reservations/{connectionId}` (ResourceTemplate); everything else is `MCPType.EXCLUDE`. The MCP-internal call to `/reservations` runs through the existing FastAPI handlers and dependencies, so no business logic is duplicated. When `auth_enabled=true`, an httpx event hook forwards the MCP client's `Authorization` header to the internal call so the existing `get_authenticated_user` dependency re-validates.
+- **Settings**: all configuration is via environment variables (bare names, no prefix), managed by `pydantic-settings` (`settings.py`). The required variables are `PROVIDER_URL`, `REQUESTER_NSA`, `PROVIDER_NSA`, and `BASE_URL`.
+- **Trusted-header authentication**: when `PROXY_AUTH_ENABLED=true`, every request to `/reservations`, `/openapi.json`, `/docs`, and `/redoc` must carry identity headers set by the edge proxy. On the portal route, Traefik plus oauth2-proxy lands `X-Auth-Request-Email` and `X-Auth-Request-Groups`. On the mTLS route, the `nsi-auth` validate sidecar lands the configured `MTLS_HEADER` plus `X-Client-DN`. `OIDC_REQUIRED_GROUPS` (a single list of group URNs) gates both surfaces; `check_groups` is a pure set intersection against the parsed `X-Auth-Request-Groups`. `/health` is always unauthenticated. `/nsi/v2/callback` uses a stricter dependency that accepts only the mTLS header (`get_mtls_authenticated_callback`) so browser/OIDC users can't forge async NSI callbacks even if Traefik routing puts them on a path that reaches it. `OIDC_REQUIRED_GROUPS` must be `[]` (not empty string) when no groups are required — pydantic-settings JSON-parses `list[str]` env vars before field validators run.
+- **MCP as a local gateway**: when `MCP_ENABLED=true`, an `aggregator_proxy/mcp_server.py` factory builds a `FastMCP.from_fastapi()` sub-app mounted at `MCP_PATH`. Route maps expose only `GET /reservations` (Resource) and `GET /reservations/{connectionId}` (ResourceTemplate); everything else is `MCPType.EXCLUDE`. MCP keeps its own JWT verifier (`fastmcp.JWTVerifier`, configured via the dedicated `MCP_OIDC_*` settings) because MCP access tokens come from a different OIDC provider than the portal IdP. The internal MCP→REST call goes through an httpx event hook (`_forward_user_identity`) that decodes the validated JWT's payload, reads `MCP_OIDC_EMAIL_CLAIM` and `MCP_OIDC_GROUPS_CLAIM`, and sets `X-Auth-Request-Email` + `X-Auth-Request-Groups` on the outgoing request — letting REST trust the same kind of headers as the portal path. `Authorization` is dropped on the internal call. The Settings model validator refuses the combination `PROXY_AUTH_ENABLED=true ∧ MCP_ENABLED=true ∧ MCP_AUTH_ENABLED=false` at startup to prevent unverified JWT claims from being translated into trusted REST headers.
 
 ### Module layout
 
 ```
 aggregator_proxy/
-  main.py               # FastAPI app, lifespan, entry point (run()), /health endpoint
-  settings.py           # pydantic-settings config (env prefix: AGGREGATOR_PROXY_)
-  auth.py               # OIDC JWT + mTLS authentication (get_authenticated_user,
-                        #   get_mtls_authenticated_callback dependencies)
+  main.py               # FastAPI app via create_app() factory, lifespan, entry point (run()),
+                        #   /health, auth-gated /openapi.json /docs /redoc
+  settings.py           # pydantic-settings config (no env prefix); cross-field model
+                        #   validator forbids PROXY_AUTH_ENABLED + MCP_ENABLED + !MCP_AUTH_ENABLED
+  auth.py               # Trusted-header authentication: get_authenticated_user reads
+                        #   X-Auth-Request-Email/Groups (OIDC) or MTLS_HEADER (mTLS);
+                        #   get_mtls_authenticated_callback is strict-mTLS-only
+  mcp_server.py         # FastMCP factory + _forward_user_identity hook that translates
+                        #   the validated MCP JWT into X-Auth-Request-* trusted headers
   models.py             # Pydantic request/response models and ReservationStatus enum
   reservation_store.py  # In-memory reservation store and pending NSI correlation tracking
   state_mapping.py      # Maps NSI sub-state machines to proxy ReservationStatus
@@ -115,32 +120,30 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `AGGREGATOR_PROXY_PROVIDER_URL` | Yes | — | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
-| `AGGREGATOR_PROXY_REQUESTER_NSA` | Yes | — | NSA URN used as requesterNSA in `querySummarySync` requests to the aggregator |
-| `AGGREGATOR_PROXY_PROVIDER_NSA` | Yes | — | NSA URN of the aggregator; used as providerNSA in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
-| `AGGREGATOR_PROXY_BASE_URL` | Yes | — | Externally reachable base URL of this proxy; `/nsi/v2/callback` is appended to form the `replyTo` in outbound SOAP headers |
-| `AGGREGATOR_PROXY_CLIENT_CERT` | No | None | Path to client TLS certificate |
-| `AGGREGATOR_PROXY_CLIENT_KEY` | No | None | Path to client TLS private key |
-| `AGGREGATOR_PROXY_CA_FILE` | No | None | Path to CA bundle for server verification |
-| `AGGREGATOR_PROXY_NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
-| `AGGREGATOR_PROXY_DATAPLANE_TIMEOUT` | No | `300` | Seconds to wait for `DataPlaneStateChange(active=True)` after provision |
-| `AGGREGATOR_PROXY_LOG_LEVEL` | No | `INFO` | Log level |
-| `AGGREGATOR_PROXY_HOST` | No | `0.0.0.0` | Bind host |
-| `AGGREGATOR_PROXY_PORT` | No | `8080` | Bind port |
-| `AGGREGATOR_PROXY_ROOT_PATH` | No | _(empty)_ | ASGI root path prefix for reverse proxy with path stripping |
-| `AGGREGATOR_PROXY_AUTH_ENABLED` | No | `false` | Enable authentication on `/reservations` endpoints |
-| `AGGREGATOR_PROXY_MTLS_HEADER` | No | _(empty)_ | Header name that nsi-auth sets on successful mTLS validation (e.g. `X-Auth-Method`) |
-| `AGGREGATOR_PROXY_OIDC_ISSUER` | No | _(empty)_ | Expected `iss` claim in the JWT; OIDC is active when set |
-| `AGGREGATOR_PROXY_OIDC_AUDIENCE` | No | _(empty)_ | Expected `aud` claim in the JWT |
-| `AGGREGATOR_PROXY_OIDC_JWKS_URI` | No | _(empty)_ | JWKS endpoint URL; auto-discovered from issuer if empty |
-| `AGGREGATOR_PROXY_OIDC_USERINFO_URI` | No | _(empty)_ | Userinfo endpoint URL; auto-discovered if empty |
-| `AGGREGATOR_PROXY_OIDC_GROUP_CLAIM` | No | `eduperson_entitlement` | Claim name in userinfo containing group memberships |
-| `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | No | `[]` | Groups required for access (JSON array or comma-separated) |
-| `AGGREGATOR_PROXY_OIDC_JWKS_CACHE_LIFESPAN` | No | `300` | JWKS key cache TTL in seconds |
-| `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | No | `60` | Userinfo response cache TTL in seconds |
-| `AGGREGATOR_PROXY_MCP_ENABLED` | No | `false` | Mount the MCP sub-app at `MCP_PATH`. Off by default; opt-in. |
-| `AGGREGATOR_PROXY_MCP_PATH` | No | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and not end with `/`; validated at startup. |
-| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | No | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the issuer/audience/JWKS URI from the existing `OIDC_*` settings. Must be `true` whenever `AUTH_ENABLED=true`, and `OIDC_REQUIRED_GROUPS` must be empty when this is `true` (group authorization is not supported on MCP — see startup validation in `_validate_mcp_settings`). |
+| `PROVIDER_URL` | Yes | — | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
+| `REQUESTER_NSA` | Yes | — | NSA URN used as requesterNSA in `querySummarySync` requests to the aggregator |
+| `PROVIDER_NSA` | Yes | — | NSA URN of the aggregator; used as providerNSA in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
+| `BASE_URL` | Yes | — | Externally reachable base URL of this proxy; `/nsi/v2/callback` is appended to form the `replyTo` in outbound SOAP headers |
+| `CLIENT_CERT` | No | None | Path to client TLS certificate |
+| `CLIENT_KEY` | No | None | Path to client TLS private key |
+| `CA_FILE` | No | None | Path to CA bundle for server verification |
+| `NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `DATAPLANE_TIMEOUT` | No | `300` | Seconds to wait for `DataPlaneStateChange(active=True)` after provision |
+| `LOG_LEVEL` | No | `INFO` | Log level |
+| `HOST` | No | `0.0.0.0` | Bind host |
+| `PORT` | No | `8080` | Bind port |
+| `ROOT_PATH` | No | _(empty)_ | ASGI root path prefix for reverse proxy with path stripping |
+| `PROXY_AUTH_ENABLED` | No | `false` | Enable authentication on `/reservations`, `/openapi.json`, `/docs`, and `/redoc`. `/health` stays unauthenticated. |
+| `MTLS_HEADER` | No | _(empty)_ | Header name that nsi-auth sets on successful mTLS validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication; `X-Client-DN` is logged for audit. |
+| `OIDC_REQUIRED_GROUPS` | No | `[]` | Groups required for access (JSON array or comma-separated). Single list gates both the portal path and (when MCP is enabled) MCP-mediated calls, so it must include URNs from both providers. |
+| `MCP_ENABLED` | No | `false` | Mount the MCP sub-app at `MCP_PATH`. Off by default; opt-in. |
+| `MCP_PATH` | No | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and not end with `/`; validated at startup. |
+| `MCP_AUTH_ENABLED` | No | `false` | Validate incoming MCP JWTs via `fastmcp.JWTVerifier`. **Must be `true`** when `PROXY_AUTH_ENABLED=true` and `MCP_ENABLED=true`; the Settings model validator refuses the unsafe combination at startup to prevent the claim-translation hook from forwarding unverified claims as trusted headers. |
+| `MCP_OIDC_JWKS_URI` | No | _(empty)_ | JWKS URI for the MCP OIDC provider (separate IdP from the portal). |
+| `MCP_OIDC_ISSUER` | No | _(empty)_ | Expected `iss` claim for MCP-issued JWTs. |
+| `MCP_OIDC_AUDIENCE` | No | _(empty)_ | Expected `aud` claim for MCP-issued JWTs. |
+| `MCP_OIDC_EMAIL_CLAIM` | No | `email` | Claim name read from the MCP JWT and forwarded as `X-Auth-Request-Email` on the internal MCP→REST call. |
+| `MCP_OIDC_GROUPS_CLAIM` | No | `groups` | Claim name read from the MCP JWT and forwarded as `X-Auth-Request-Groups` on the internal MCP→REST call. |
 
 ### Non-obvious invariants
 
@@ -165,7 +168,7 @@ Tests use `pytest-asyncio` in `auto` mode (all async test functions run automati
 
 ### Local env file
 
-`aggregator_proxy.env` in the repo root can hold `AGGREGATOR_PROXY_*` values as `KEY=VALUE` lines. Environment variables take precedence. The file is read automatically on startup if present in the working directory.
+`aggregator_proxy.env` in the repo root can hold bare `KEY=VALUE` lines (e.g. `PROVIDER_URL=…`, `PROXY_AUTH_ENABLED=true`). Environment variables take precedence. The file is read automatically on startup if present in the working directory.
 
 ### Code style
 

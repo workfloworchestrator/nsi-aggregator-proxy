@@ -29,7 +29,7 @@ def _mcp_disabled_auth(monkeypatch) -> None:
     """Ensure auth flags are off so build_mcp can be constructed without OIDC config."""
     from aggregator_proxy.settings import settings
 
-    monkeypatch.setattr(settings, "auth_enabled", False)
+    monkeypatch.setattr(settings, "proxy_auth_enabled", False)
     monkeypatch.setattr(settings, "mcp_auth_enabled", False)
 
 

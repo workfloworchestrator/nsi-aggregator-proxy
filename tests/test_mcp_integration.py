@@ -60,7 +60,7 @@ def _mock_aggregator(connection_id: str) -> Callable[[httpx.Request], httpx.Resp
 def _app_with_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
     from aggregator_proxy.settings import settings
 
-    monkeypatch.setattr(settings, "auth_enabled", False)
+    monkeypatch.setattr(settings, "proxy_auth_enabled", False)
     monkeypatch.setattr(settings, "mcp_auth_enabled", False)
 
     store = ReservationStore()

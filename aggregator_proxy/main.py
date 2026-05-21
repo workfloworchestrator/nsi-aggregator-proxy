@@ -24,10 +24,11 @@ import httpx
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastmcp.utilities.lifespan import combine_lifespans
 
-from aggregator_proxy.auth import OIDCProvider, get_authenticated_user, get_mtls_authenticated_callback
+from aggregator_proxy.auth import get_authenticated_user, get_mtls_authenticated_callback
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.mcp_server import build_mcp
 from aggregator_proxy.nsi_client import create_nsi_client
@@ -57,53 +58,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.nsi_client = create_nsi_client()
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = ReservationStore()
-    if settings.auth_enabled and settings.oidc_issuer:
-        app.state.oidc_http_client = httpx.AsyncClient()
-        jwks_uri = settings.oidc_jwks_uri
-        userinfo_uri = settings.oidc_userinfo_uri
 
-        if not jwks_uri or not userinfo_uri:
-            oidc_config_url = f"{settings.oidc_issuer.rstrip('/')}/.well-known/openid-configuration"
-            logger.info("Discovering OIDC configuration", url=oidc_config_url)
-            resp = await app.state.oidc_http_client.get(oidc_config_url)
-            resp.raise_for_status()
-            oidc_config = resp.json()
-            jwks_uri = jwks_uri or oidc_config.get("jwks_uri", "")
-            userinfo_uri = userinfo_uri or oidc_config.get("userinfo_endpoint", "")
-
-        if not jwks_uri or not userinfo_uri:
-            logger.error(
-                "OIDC configuration incomplete",
-                jwks_uri=bool(jwks_uri),
-                userinfo_uri=bool(userinfo_uri),
-            )
-            raise SystemExit("OIDC requires both jwks_uri and userinfo_endpoint")
-
-        app.state.oidc_provider = OIDCProvider(
-            jwks_uri=jwks_uri,
-            userinfo_uri=userinfo_uri,
-            http_client=app.state.oidc_http_client,
-            cache_lifespan=settings.oidc_jwks_cache_lifespan,
-            userinfo_cache_ttl=settings.oidc_userinfo_cache_ttl,
-        )
+    if settings.proxy_auth_enabled:
         logger.info(
-            "OIDC authentication enabled",
-            issuer=settings.oidc_issuer,
-            audience=settings.oidc_audience,
-            jwks_uri=jwks_uri,
-            userinfo_uri=userinfo_uri,
+            "Authentication enabled",
+            mtls_header=settings.mtls_header or None,
+            required_groups=settings.oidc_required_groups,
         )
-    else:
-        app.state.oidc_provider = None
-        app.state.oidc_http_client = None
-
-    if settings.auth_enabled:
-        methods = []
-        if settings.oidc_issuer:
-            methods.append("OIDC")
-        if settings.mtls_header:
-            methods.append(f"mTLS (header: {settings.mtls_header})")
-        logger.info("Authentication enabled", methods=methods)
     else:
         logger.info("Authentication disabled")
 
@@ -116,75 +77,91 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()
     await app.state.callback_client.aclose()
-    if app.state.oidc_http_client:
-        await app.state.oidc_http_client.aclose()
 
 
-app = FastAPI(
-    title="NSI Aggregator Proxy",
-    description=("REST proxy exposing a simplified connection state-machine on top of an NSI aggregator."),
-    version=APP_VERSION,
-    lifespan=lifespan,
-    root_path=settings.root_path,
-)
+def create_app() -> FastAPI:
+    """Build the FastAPI app.
 
-_auth_deps = [Depends(get_authenticated_user)]
-_callback_auth_deps = [Depends(get_mtls_authenticated_callback)]
-app.include_router(reservations.router, dependencies=_auth_deps)
-app.include_router(nsi_callback_router, dependencies=_callback_auth_deps)
-
-
-@app.exception_handler(httpx.HTTPStatusError)
-async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
-    """Return 502 when the aggregator returns an error, without logging a stacktrace."""
-    logger.error("Unhandled aggregator HTTP error", status_code=exc.response.status_code, url=str(exc.request.url))
-    return JSONResponse(status_code=502, content={"detail": "NSI aggregator returned an error"})
-
-
-@app.get("/health", status_code=200, include_in_schema=False)
-async def health() -> Response:
-    """Liveness probe endpoint."""
-    return Response(status_code=200)
-
-
-def _validate_mcp_settings() -> None:
-    """Refuse to start when MCP/REST auth flags are inconsistent.
-
-    Raises:
-        SystemExit: If REST auth is enabled but MCP auth is not, if MCP auth
-            is enabled without an explicit OIDC JWKS URI, or if MCP auth is
-            enabled while OIDC group authorization is required. FastMCP's
-            ``JWTVerifier`` validates the token but does not call the userinfo
-            endpoint, and the token-forwarding event hook only forwards the
-            ``Authorization`` header — not the ``X-Auth-Request-Access-Token``
-            header that ``get_authenticated_user`` requires for the userinfo
-            group lookup. The internal call would therefore always 401, so we
-            fail fast instead.
+    ``/openapi.json``, ``/docs``, and ``/redoc`` are served by explicit routes
+    that share the same authentication dependency as the data endpoints, so
+    they're available to authorised users and rejected with 401/403 otherwise.
+    FastAPI's built-in docs routes are disabled because they cannot be put
+    behind a ``Depends``. When ``MCP_ENABLED`` is true, the MCP sub-app is
+    mounted at ``settings.mcp_path`` and its lifespan combined with this app's.
     """
-    if settings.auth_enabled and not settings.mcp_auth_enabled:
-        raise SystemExit("AGGREGATOR_PROXY_MCP_AUTH_ENABLED must be true when AGGREGATOR_PROXY_AUTH_ENABLED is true")
-    if settings.mcp_auth_enabled and not settings.oidc_jwks_uri:
-        raise SystemExit(
-            "AGGREGATOR_PROXY_OIDC_JWKS_URI must be set explicitly when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true"
+    auth_deps = [Depends(get_authenticated_user)]
+    callback_auth_deps = [Depends(get_mtls_authenticated_callback)]
+    fastapi_app = FastAPI(
+        title="NSI Aggregator Proxy",
+        description=("REST proxy exposing a simplified connection state-machine on top of an NSI aggregator."),
+        version=APP_VERSION,
+        lifespan=lifespan,
+        root_path=settings.root_path,
+        openapi_url=None,
+        docs_url=None,
+        redoc_url=None,
+    )
+
+    @fastapi_app.get("/openapi.json", include_in_schema=False, dependencies=auth_deps)
+    async def openapi_endpoint(request: Request) -> JSONResponse:
+        schema = fastapi_app.openapi()
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        if root_path and "servers" not in schema:
+            schema["servers"] = [{"url": root_path}]
+        return JSONResponse(schema)
+
+    @fastapi_app.get("/docs", include_in_schema=False, dependencies=auth_deps)
+    async def swagger_ui(request: Request) -> HTMLResponse:
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        return get_swagger_ui_html(
+            openapi_url=root_path + "/openapi.json",
+            title=fastapi_app.title + " - Swagger UI",
         )
-    if settings.mcp_auth_enabled and settings.oidc_required_groups:
-        raise SystemExit(
-            "AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS must be empty when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true; "
-            "group-based authorization is not enforced on the MCP endpoint"
+
+    @fastapi_app.get("/redoc", include_in_schema=False, dependencies=auth_deps)
+    async def redoc(request: Request) -> HTMLResponse:
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        return get_redoc_html(
+            openapi_url=root_path + "/openapi.json",
+            title=fastapi_app.title + " - ReDoc",
         )
+
+    fastapi_app.include_router(reservations.router, dependencies=auth_deps)
+    fastapi_app.include_router(nsi_callback_router, dependencies=callback_auth_deps)
+
+    @fastapi_app.exception_handler(httpx.HTTPStatusError)
+    async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:
+        """Return 502 when the aggregator returns an error, without logging a stacktrace."""
+        logger.error(
+            "Unhandled aggregator HTTP error", status_code=exc.response.status_code, url=str(exc.request.url)
+        )
+        return JSONResponse(status_code=502, content={"detail": "NSI aggregator returned an error"})
+
+    @fastapi_app.get("/health", status_code=200, include_in_schema=False)
+    async def health() -> Response:
+        """Liveness probe endpoint."""
+        return Response(status_code=200)
+
+    if settings.mcp_enabled:
+        _setup_mcp(fastapi_app)
+
+    return fastapi_app
 
 
 def _setup_mcp(app: FastAPI) -> None:
-    """Validate MCP settings, build the MCP sub-app, and mount it on `app`."""
-    _validate_mcp_settings()
+    """Build the MCP sub-app and mount it on ``app``.
+
+    The MCP-auth / REST-auth invariant is enforced by the Settings model
+    validator (``_require_mcp_auth_when_proxy_auth_enabled``), so by the time
+    we reach this function the combination is known-valid.
+    """
     mcp_app = build_mcp(app).http_app(path="/")
     original_lifespan = app.router.lifespan_context
     app.router.lifespan_context = combine_lifespans(original_lifespan, mcp_app.lifespan)
     app.mount(settings.mcp_path, mcp_app)
 
 
-if settings.mcp_enabled:
-    _setup_mcp(app)
+app = create_app()
 
 
 def run() -> None:

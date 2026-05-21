@@ -18,19 +18,17 @@
 import json
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """NSI Aggregator Proxy settings.
 
-    All settings can be supplied via environment variables with the
-    ``AGGREGATOR_PROXY_`` prefix, e.g. ``AGGREGATOR_PROXY_HOST=0.0.0.0``.
+    All settings can be supplied via environment variables — e.g. ``HOST=0.0.0.0``.
     """
 
     model_config = SettingsConfigDict(
-        env_prefix="AGGREGATOR_PROXY_",
         env_file="aggregator_proxy.env",
         env_file_encoding="utf-8",
     )
@@ -70,20 +68,27 @@ class Settings(BaseSettings):
     port: int = 8080
     root_path: str = ""
 
-    auth_enabled: bool = False
+    # Authentication for the REST API and the SOAP callback endpoint. Reads
+    # identity headers set by the edge proxy (oauth2-proxy on the portal route,
+    # nsi-auth on the mTLS route). When false, all requests pass through.
+    proxy_auth_enabled: bool = False
     mtls_header: str = ""
-    oidc_issuer: str = ""
-    oidc_audience: str = ""
-    oidc_jwks_uri: str = ""
-    oidc_userinfo_uri: str = ""
-    oidc_group_claim: str = "eduperson_entitlement"
     oidc_required_groups: list[str] = []
-    oidc_jwks_cache_lifespan: int = 300
-    oidc_userinfo_cache_ttl: int = 60
 
+    # MCP server settings. The MCP endpoint is a separate authentication surface
+    # that uses fastmcp's JWTVerifier against a (potentially different) OIDC
+    # provider. mcp_oidc_* settings configure that verifier; mcp_oidc_*_claim
+    # tells the claim-translation hook which JWT claims carry the user's email
+    # and group memberships, which the hook then forwards to the REST layer as
+    # X-Auth-Request-Email and X-Auth-Request-Groups.
     mcp_enabled: bool = False
     mcp_path: str = "/mcp"
     mcp_auth_enabled: bool = False
+    mcp_oidc_jwks_uri: str = ""
+    mcp_oidc_issuer: str = ""
+    mcp_oidc_audience: str = ""
+    mcp_oidc_email_claim: str = "email"
+    mcp_oidc_groups_claim: str = "groups"
 
     @field_validator("oidc_required_groups", mode="before")
     @classmethod
@@ -105,10 +110,30 @@ class Settings(BaseSettings):
     def validate_mcp_path(cls, v: str) -> str:
         """Require a leading slash and reject trailing slash so app.mount behaves predictably."""
         if not v.startswith("/"):
-            raise ValueError("AGGREGATOR_PROXY_MCP_PATH must start with '/'")
+            raise ValueError("MCP_PATH must start with '/'")
         if len(v) > 1 and v.endswith("/"):
-            raise ValueError("AGGREGATOR_PROXY_MCP_PATH must not end with '/'")
+            raise ValueError("MCP_PATH must not end with '/'")
         return v
+
+    @model_validator(mode="after")
+    def _require_mcp_auth_when_proxy_auth_enabled(self) -> "Settings":
+        """Refuse a combination that would let unverified MCP claims reach REST.
+
+        The MCP claim-translation hook (mcp_server._forward_user_identity) extracts
+        email and groups from the incoming JWT without re-verifying its signature —
+        it trusts that fastmcp.JWTVerifier already validated. If MCP_AUTH_ENABLED is
+        false while PROXY_AUTH_ENABLED and MCP_ENABLED are true, fastmcp validates
+        nothing, the hook would translate arbitrary attacker-supplied claims into
+        trusted X-Auth-Request-* headers, and REST would accept them — a
+        privilege-escalation path. Fail fast at startup instead.
+        """
+        if self.proxy_auth_enabled and self.mcp_enabled and not self.mcp_auth_enabled:
+            raise ValueError(
+                "MCP_AUTH_ENABLED must be true when PROXY_AUTH_ENABLED and MCP_ENABLED are both true — "
+                "otherwise the MCP claim-translation hook would translate unverified JWT claims into "
+                "trusted REST headers."
+            )
+        return self
 
 
 settings = Settings()  # type: ignore[call-arg]

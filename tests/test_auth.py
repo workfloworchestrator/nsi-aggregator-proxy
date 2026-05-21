@@ -12,502 +12,333 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tests for the authentication dependencies.
 
-"""Tests for OIDC JWT authentication and group-based authorization."""
+Authentication is performed at the edge proxy (Traefik + oauth2-proxy for the
+portal route, nsi-auth for the mTLS route) and the resulting identity is
+forwarded as request headers. ``get_authenticated_user`` reads
+``X-Auth-Request-Email`` plus ``X-Auth-Request-Groups`` on the OIDC path, or
+the configured ``mtls_header`` (with ``X-Client-DN``) on the mTLS path.
+``get_mtls_authenticated_callback`` is strict-mTLS-only: it must reject
+OIDC users even if they manage to reach ``/nsi/v2/callback`` through the
+portal HTTPRoute.
+"""
 
-import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import httpx
-import jwt as pyjwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
-from jwt import PyJWKClientConnectionError, PyJWKClientError
 
-from aggregator_proxy.auth import OIDCProvider, check_groups
-from aggregator_proxy.main import app
-from aggregator_proxy.reservation_store import ReservationStore
-
-TEST_ISSUER = "https://idp.example.org"
-TEST_AUDIENCE = "test-client-id"
-TEST_SUBJECT = "user-123"
-TEST_JWKS_URI = "https://idp.example.org/.well-known/jwks.json"
-TEST_USERINFO_URI = "https://idp.example.org/userinfo"
-
-_BASE_OIDC_PATCHES: dict[str, Any] = {
-    "auth_enabled": True,
-    "mtls_header": "",
-    "oidc_issuer": TEST_ISSUER,
-    "oidc_audience": TEST_AUDIENCE,
-    "oidc_jwks_uri": TEST_JWKS_URI,
-    "oidc_userinfo_uri": TEST_USERINFO_URI,
-    "oidc_required_groups": [],
-    "oidc_group_claim": "eduperson_entitlement",
-}
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+from aggregator_proxy.auth import check_groups
 
 
-def _mock_app_state(app_instance: Any) -> None:
-    """Inject mock state objects so endpoints don't crash after auth passes."""
-    app_instance.state.nsi_client = AsyncMock()
-    app_instance.state.callback_client = AsyncMock()
-    app_instance.state.reservation_store = ReservationStore()
+def _mock_nsi_client() -> AsyncMock:
+    """Mock NSI client so reservations routes don't try to talk to a real aggregator."""
+    return AsyncMock()
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def rsa_keypair():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return private_key, private_key.public_key()
-
-
-@pytest.fixture
-def make_token(rsa_keypair):
-    """Factory to create signed JWTs with sane defaults."""
-    private_key, _ = rsa_keypair
-
-    def _make(
-        *,
-        sub: str = TEST_SUBJECT,
-        iss: str = TEST_ISSUER,
-        aud: str = TEST_AUDIENCE,
-        exp: float | None = None,
-        extra_claims: dict | None = None,
-    ) -> str:
-        now = time.time()
-        claims = {
-            "sub": sub,
-            "iss": iss,
-            "aud": aud,
-            "exp": exp if exp is not None else now + 3600,
-            "iat": now,
-        }
-        if extra_claims:
-            claims.update(extra_claims)
-        return pyjwt.encode(claims, private_key, algorithm="RS256")
-
-    return _make
-
-
-@pytest.fixture
-def mock_oidc_provider(rsa_keypair):
-    """OIDCProvider mock that returns the test public key for signature verification."""
-    _, public_key = rsa_keypair
-    provider = AsyncMock(spec=OIDCProvider)
-
-    mock_jwk = AsyncMock()
-    mock_jwk.key = public_key
-    provider.get_signing_key = AsyncMock(return_value=mock_jwk)
-    provider.fetch_userinfo = AsyncMock(return_value={})
-
-    return provider
+def _mock_reservation_store() -> AsyncMock:
+    """Mock reservation store so the routes' DI is satisfied."""
+    return AsyncMock()
 
 
 @contextmanager
-def _patched_auth_client(mock_oidc_provider: AsyncMock, *, required_groups: list[str] | None = None):
-    """Context manager: patch settings, start TestClient, inject mocks."""
-    patches = {**_BASE_OIDC_PATCHES}
-    if required_groups is not None:
-        patches["oidc_required_groups"] = required_groups
+def _auth_client(**setting_overrides: Any) -> Iterator[TestClient]:
+    """TestClient with auth.settings patched and stub app state installed."""
+    base: dict[str, Any] = {
+        "proxy_auth_enabled": True,
+        "mtls_header": "",
+        "oidc_required_groups": [],
+    }
+    base.update(setting_overrides)
+    from aggregator_proxy.main import app
 
     with (
-        patch.multiple("aggregator_proxy.auth.settings", **patches),
-        patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
+        patch.multiple("aggregator_proxy.auth.settings", **base),
         TestClient(app, raise_server_exceptions=False) as client,
     ):
-        _mock_app_state(app)
-        app.state.oidc_provider = mock_oidc_provider
-        app.state.oidc_http_client = AsyncMock()
-        yield client, mock_oidc_provider
-
-
-@pytest.fixture
-def auth_api(mock_oidc_provider):
-    """TestClient with OIDC enabled, no required groups."""
-    with _patched_auth_client(mock_oidc_provider) as result:
-        yield result
-
-
-@pytest.fixture
-def auth_api_with_groups(mock_oidc_provider):
-    """TestClient with OIDC enabled and required groups."""
-    with _patched_auth_client(mock_oidc_provider, required_groups=["urn:example:admins"]) as result:
-        yield result
+        app.state.nsi_client = _mock_nsi_client()
+        app.state.callback_client = AsyncMock()
+        app.state.reservation_store = _mock_reservation_store()
+        yield client
 
 
 # ---------------------------------------------------------------------------
-# Token extraction tests
+# get_authenticated_user — OIDC + mTLS branches
 # ---------------------------------------------------------------------------
 
 
-class TestTokenExtraction:
-    @pytest.mark.parametrize(
-        "auth_header",
-        [
-            pytest.param(None, id="no-header"),
-            pytest.param("", id="empty-header"),
-            pytest.param("Basic dXNlcjpwYXNz", id="basic-auth"),
-            pytest.param("Bearer ", id="bearer-no-token"),
-        ],
-    )
-    def test_no_bearer_token_rejected_when_auth_enabled(self, auth_api, auth_header):
-        """Requests without credentials are rejected when auth is enabled."""
-        client, _ = auth_api
-        headers = {"Authorization": auth_header} if auth_header is not None else {}
-        resp = client.get("/reservations", headers=headers)
+@pytest.mark.parametrize(
+    ("headers", "required_groups", "mtls_header", "expected_status"),
+    [
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org"},
+            [],
+            "",
+            200,
+            id="oidc-email-no-groups-required",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "developer,viewer"},
+            ["developer"],
+            "",
+            200,
+            id="oidc-group-match-comma-separated",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "developer viewer"},
+            ["viewer"],
+            "",
+            200,
+            id="oidc-group-match-space-separated",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "viewer"},
+            ["developer"],
+            "",
+            403,
+            id="oidc-group-mismatch",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org"},
+            ["developer"],
+            "",
+            403,
+            id="oidc-groups-header-missing-when-required",
+        ),
+        pytest.param(
+            {},
+            [],
+            "",
+            401,
+            id="no-identity-no-mtls",
+        ),
+        pytest.param(
+            {"X-Auth-Method": "mTLS", "X-Client-DN": "CN=Test"},
+            [],
+            "X-Auth-Method",
+            200,
+            id="mtls-happy-path",
+        ),
+        pytest.param(
+            {"X-Auth-Method": "mTLS"},
+            [],
+            "X-Auth-Method",
+            200,
+            id="mtls-without-client-dn",
+        ),
+        pytest.param(
+            {"X-Auth-Method": "   "},
+            [],
+            "X-Auth-Method",
+            401,
+            id="mtls-header-whitespace",
+        ),
+        pytest.param(
+            {"X-Auth-Method": ""},
+            [],
+            "X-Auth-Method",
+            401,
+            id="mtls-header-empty",
+        ),
+        pytest.param(
+            {
+                "X-Auth-Request-Email": "alice@example.org",
+                "X-Auth-Request-Groups": "developer",
+                "X-Auth-Method": "mTLS",
+            },
+            ["developer"],
+            "X-Auth-Method",
+            200,
+            id="oidc-wins-when-both-present",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "   "},
+            [],
+            "",
+            401,
+            id="oidc-whitespace-email-treated-as-absent",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "   "},
+            [],
+            "X-Auth-Method",
+            401,
+            id="oidc-whitespace-email-does-not-fall-through-to-mtls",
+        ),
+        pytest.param(
+            {},
+            [],
+            "X-Auth-Method",
+            401,
+            id="mtls-configured-but-header-missing",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Client-DN": "CN=spoofed"},
+            [],
+            "X-Auth-Method",
+            200,
+            id="x-client-dn-cannot-divert-to-mtls-branch",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "developer , viewer "},
+            ["viewer"],
+            "",
+            200,
+            id="oidc-groups-tolerate-whitespace-around-commas",
+        ),
+    ],
+)
+def test_get_authenticated_user(
+    headers: dict[str, str],
+    required_groups: list[str],
+    mtls_header: str,
+    expected_status: int,
+) -> None:
+    with _auth_client(oidc_required_groups=required_groups, mtls_header=mtls_header) as client:
+        resp = client.get("/openapi.json", headers=headers)
+        assert resp.status_code == expected_status
+
+
+def test_401_response_advertises_bearer_scheme() -> None:
+    with _auth_client() as client:
+        resp = client.get("/openapi.json")
         assert resp.status_code == 401
-        assert resp.json()["detail"] == "Authentication required"
+        assert resp.headers.get("www-authenticate") == "Bearer"
 
 
 # ---------------------------------------------------------------------------
-# Signature validation tests
+# get_mtls_authenticated_callback — strict mTLS on /nsi/v2/callback
 # ---------------------------------------------------------------------------
 
 
-class TestSignatureValidation:
-    @pytest.mark.parametrize(
-        "headers_factory",
-        [
-            pytest.param(lambda t: {"Authorization": f"Bearer {t}"}, id="authorization-header"),
-            pytest.param(lambda t: {"X-Auth-Request-Access-Token": t}, id="access-token-header"),
-        ],
-    )
-    def test_valid_token_returns_200(self, auth_api, make_token, headers_factory):
-        client, _ = auth_api
-        resp = client.get("/reservations", headers=headers_factory(make_token()))
-        assert resp.status_code == 200
-
-    def test_tampered_token_returns_401(self, auth_api, mock_oidc_provider):
-        mock_oidc_provider.get_signing_key.side_effect = pyjwt.PyJWTError("Invalid header")
-        client, _ = auth_api
-        resp = client.get("/reservations", headers={"Authorization": "Bearer tampered.jwt.here"})
-        assert resp.status_code == 401
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            pytest.param(PyJWKClientError("Failed to fetch JWKS"), id="jwk-client-error"),
-            pytest.param(PyJWKClientConnectionError("Connection refused"), id="jwk-connection-error"),
-        ],
-    )
-    def test_jwks_failure_returns_401(self, auth_api, error):
-        client, mock_provider = auth_api
-        mock_provider.get_signing_key.side_effect = error
-        resp = client.get("/reservations", headers={"Authorization": "Bearer some.jwt.token"})
-        assert resp.status_code == 401
-        assert resp.json()["detail"] == "Token validation failed"
-
-
-# ---------------------------------------------------------------------------
-# Claim validation tests
-# ---------------------------------------------------------------------------
-
-
-class TestClaimValidation:
-    def test_expired_token(self, auth_api, make_token):
-        client, _ = auth_api
-        token = make_token(exp=time.time() - 3600)
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {token}"})
-        assert resp.status_code == 401
-        assert resp.json()["detail"] == "Token expired"
-
-    def test_wrong_audience(self, auth_api, make_token):
-        client, _ = auth_api
-        token = make_token(aud="wrong-audience")
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {token}"})
-        assert resp.status_code == 401
-        assert resp.json()["detail"] == "Invalid audience"
-
-    def test_wrong_issuer(self, auth_api, make_token):
-        client, _ = auth_api
-        token = make_token(iss="https://evil.example.org")
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {token}"})
-        assert resp.status_code == 401
-        assert resp.json()["detail"] == "Invalid issuer"
-
-    def test_missing_sub_claim(self, auth_api, rsa_keypair):
-        private_key, _ = rsa_keypair
-        token = pyjwt.encode(
-            {"iss": TEST_ISSUER, "aud": TEST_AUDIENCE, "exp": time.time() + 3600},
-            private_key,
-            algorithm="RS256",
-        )
-        client, _ = auth_api
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {token}"})
-        assert resp.status_code == 401
+@pytest.mark.parametrize(
+    ("headers", "mtls_header", "expected_status"),
+    [
+        pytest.param(
+            {"X-Auth-Method": "mTLS", "X-Client-DN": "CN=Aggregator"},
+            "X-Auth-Method",
+            # 400 = SOAP body is empty; we only care that the dep let us through.
+            400,
+            id="callback-mtls-header-present-reaches-handler",
+        ),
+        pytest.param(
+            {},
+            "X-Auth-Method",
+            401,
+            id="callback-no-headers-rejected",
+        ),
+        pytest.param(
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "developer"},
+            "X-Auth-Method",
+            401,
+            id="callback-oidc-must-not-satisfy",
+        ),
+        pytest.param(
+            {"X-Auth-Method": "   "},
+            "X-Auth-Method",
+            401,
+            id="callback-whitespace-mtls-header-rejected",
+        ),
+        pytest.param(
+            {"X-Auth-Method": "mTLS"},
+            "",
+            401,
+            id="callback-mtls-header-not-configured-still-rejects",
+        ),
+    ],
+)
+def test_get_mtls_authenticated_callback(
+    headers: dict[str, str],
+    mtls_header: str,
+    expected_status: int,
+) -> None:
+    with _auth_client(mtls_header=mtls_header) as client:
+        resp = client.post("/nsi/v2/callback", headers=headers, content=b"")
+        assert resp.status_code == expected_status
 
 
-# ---------------------------------------------------------------------------
-# Group authorization tests
-# ---------------------------------------------------------------------------
+def test_auth_disabled_lets_everything_through() -> None:
+    from aggregator_proxy.main import app
+
+    with (
+        patch.multiple("aggregator_proxy.auth.settings", proxy_auth_enabled=False),
+        TestClient(app, raise_server_exceptions=False) as client,
+    ):
+        app.state.nsi_client = _mock_nsi_client()
+        app.state.callback_client = AsyncMock()
+        app.state.reservation_store = _mock_reservation_store()
+        # The docs endpoint is no longer auth-blocked; the auth-disabled path
+        # should let it through and serve the schema.
+        assert client.get("/openapi.json").status_code == 200
+        # Callback dep is also a no-op; empty body yields 400 from the handler.
+        assert client.post("/nsi/v2/callback", content=b"").status_code != 401
 
 
-class TestGroupAuthorization:
-    def test_user_in_required_group(self, auth_api_with_groups, make_token):
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.return_value = {"eduperson_entitlement": ["urn:example:admins"]}
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "access-token-value",
-        }
-        resp = client.get("/reservations", headers=headers)
-        assert resp.status_code == 200
-
-    def test_user_not_in_required_group(self, auth_api_with_groups, make_token):
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.return_value = {"eduperson_entitlement": ["urn:example:viewers"]}
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "access-token-value",
-        }
-        resp = client.get("/reservations", headers=headers)
-        assert resp.status_code == 403
-        assert resp.json()["detail"] == "Insufficient group membership"
-
-    def test_missing_access_token_header(self, auth_api_with_groups, make_token):
-        client, _ = auth_api_with_groups
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {make_token()}"})
-        assert resp.status_code == 401
-        assert "access token" in resp.json()["detail"].lower()
-
-    def test_group_claim_missing_from_userinfo(self, auth_api_with_groups, make_token):
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.return_value = {"sub": "user-123"}
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "access-token-value",
-        }
-        resp = client.get("/reservations", headers=headers)
-        assert resp.status_code == 403
-
-    def test_string_group_claim_handled(self, auth_api_with_groups, make_token):
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.return_value = {"eduperson_entitlement": "urn:example:admins"}
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "access-token-value",
-        }
-        resp = client.get("/reservations", headers=headers)
-        assert resp.status_code == 200
-
-    def test_userinfo_fetch_failure(self, auth_api_with_groups, make_token):
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.side_effect = httpx.HTTPError("connection refused")
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "access-token-value",
-        }
-        resp = client.get("/reservations", headers=headers)
-        assert resp.status_code == 502
-        detail = resp.json()["detail"]
-        assert detail == "Failed to fetch user information"
-        assert "connection refused" not in detail
-
-    def test_no_groups_required_skips_check(self, auth_api, make_token):
-        client, mock_provider = auth_api
-        resp = client.get("/reservations", headers={"Authorization": f"Bearer {make_token()}"})
-        assert resp.status_code == 200
-        mock_provider.fetch_userinfo.assert_not_called()
-
-    def test_userinfo_called_per_request_with_mock(self, auth_api_with_groups, make_token):
-        """Mock provider's fetch_userinfo is called each request (real caching is in OIDCProvider)."""
-        client, mock_provider = auth_api_with_groups
-        mock_provider.fetch_userinfo.return_value = {"eduperson_entitlement": ["urn:example:admins"]}
-        headers = {
-            "Authorization": f"Bearer {make_token()}",
-            "X-Auth-Request-Access-Token": "same-access-token",
-        }
-        client.get("/reservations", headers=headers)
-        client.get("/reservations", headers=headers)
-        assert mock_provider.fetch_userinfo.call_count == 2
-
-
-# ---------------------------------------------------------------------------
-# mTLS verification tests
-# ---------------------------------------------------------------------------
-
-
-def _mtls_only_client(extra_patches: dict[str, Any] | None = None):
-    """Context manager for mTLS-only tests (no OIDC issuer)."""
-    patches = {**_BASE_OIDC_PATCHES, "mtls_header": "X-Auth-Method", "oidc_issuer": "", **(extra_patches or {})}
-
-    @contextmanager
-    def _ctx():
-        with (
-            patch.multiple("aggregator_proxy.auth.settings", **patches),
-            patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
-            TestClient(app, raise_server_exceptions=False) as client,
-        ):
-            _mock_app_state(app)
-            app.state.oidc_provider = None
-            app.state.oidc_http_client = None
-            yield client
-
-    return _ctx()
-
-
-def _dual_auth_client(mock_oidc_provider: AsyncMock):
-    """Context manager for tests with both OIDC and mTLS configured."""
-    patches = {**_BASE_OIDC_PATCHES, "mtls_header": "X-Auth-Method"}
-
-    @contextmanager
-    def _ctx():
-        with (
-            patch.multiple("aggregator_proxy.auth.settings", **patches),
-            patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
-            TestClient(app, raise_server_exceptions=False) as client,
-        ):
-            _mock_app_state(app)
-            app.state.oidc_provider = mock_oidc_provider
-            app.state.oidc_http_client = AsyncMock()
-            yield client
-
-    return _ctx()
-
-
-class TestMTLSVerification:
-    @pytest.mark.parametrize(
-        ("headers", "expected_status"),
-        [
-            pytest.param({"X-Auth-Method": "mTLS", "X-Client-DN": "CN=Test"}, 200, id="valid-header"),
-            pytest.param({"X-Auth-Method": "mTLS"}, 200, id="valid-header-no-client-dn"),
-            pytest.param({}, 401, id="no-header"),
-            pytest.param({"X-Auth-Method": ""}, 401, id="empty-value"),
-            pytest.param({"X-Auth-Method": "   "}, 401, id="whitespace-value"),
-        ],
-    )
-    def test_mtls_only(self, headers, expected_status):
-        """mTLS-only mode (no OIDC issuer): header presence determines access."""
-        with _mtls_only_client() as client:
-            resp = client.get("/reservations", headers=headers)
-            assert resp.status_code == expected_status
-
-    def test_jwt_valid_no_mtls_header_returns_200(self, mock_oidc_provider, make_token):
-        """Valid JWT succeeds even without mTLS header configured."""
-        with _patched_auth_client(mock_oidc_provider) as (client, _):
-            resp = client.get("/reservations", headers={"Authorization": f"Bearer {make_token()}"})
-            assert resp.status_code == 200
-
-    def test_mtls_and_oidc_both_configured_jwt_wins(self, mock_oidc_provider, make_token):
-        """When both methods are configured, valid JWT takes the OIDC path."""
-        with _dual_auth_client(mock_oidc_provider) as client:
-            resp = client.get("/reservations", headers={"Authorization": f"Bearer {make_token()}"})
-            assert resp.status_code == 200
-            mock_oidc_provider.get_signing_key.assert_called_once()
-
-    def test_mtls_fallback_when_no_jwt(self, mock_oidc_provider):
-        """When both methods are configured and no JWT present, mTLS header is checked."""
-        with _dual_auth_client(mock_oidc_provider) as client:
-            resp = client.get("/reservations", headers={"X-Auth-Method": "mTLS", "X-Client-DN": "CN=Test"})
-            assert resp.status_code == 200
-            mock_oidc_provider.get_signing_key.assert_not_called()
-
-    def test_invalid_jwt_not_rescued_by_mtls(self, mock_oidc_provider, make_token):
-        """Invalid JWT is rejected even when mTLS header is present."""
-        mock_oidc_provider.get_signing_key.side_effect = pyjwt.PyJWTError("bad signature")
-        with _dual_auth_client(mock_oidc_provider) as client:
-            headers = {"Authorization": "Bearer tampered.jwt.here", "X-Auth-Method": "mTLS"}
-            resp = client.get("/reservations", headers=headers)
-            assert resp.status_code == 401
-
-    def test_no_methods_configured_returns_401(self):
-        """Auth enabled with neither OIDC nor mTLS configured rejects all requests."""
-        with _mtls_only_client(extra_patches={"mtls_header": ""}) as client:
-            resp = client.get("/reservations")
-            assert resp.status_code == 401
-            assert resp.json()["detail"] == "Authentication required"
-
-
-# ---------------------------------------------------------------------------
-# Auth disabled tests
-# ---------------------------------------------------------------------------
-
-
-class TestAuthDisabled:
-    def test_no_auth_required_when_disabled(self):
-        with (
-            patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
-            TestClient(app, raise_server_exceptions=True) as client,
-        ):
-            _mock_app_state(app)
-            resp = client.get("/reservations")
-            assert resp.status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# Health endpoint (unprotected)
-# ---------------------------------------------------------------------------
-
-
-class TestHealthWithAuth:
-    def test_health_returns_200_without_token(self, auth_api):
-        client, _ = auth_api
+def test_health_is_always_unprotected() -> None:
+    with _auth_client() as client:
         resp = client.get("/health")
         assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
-# NSI callback endpoint (unprotected)
+# /openapi.json, /docs, /redoc share the auth dependency
 # ---------------------------------------------------------------------------
 
 
-class TestCallbackWithAuth:
-    def test_callback_accessible_without_token_oidc_only(self, auth_api):
-        """With OIDC-only config (no mtls_header), callback does not require auth."""
-        client, _ = auth_api
-        resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
-        assert resp.status_code != 401
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+@pytest.mark.parametrize(
+    ("proxy_auth_enabled", "headers", "required_groups", "expected_status"),
+    [
+        pytest.param(False, {}, [], 200, id="auth-disabled-served-to-everyone"),
+        pytest.param(True, {}, [], 401, id="auth-enabled-no-identity"),
+        pytest.param(
+            True,
+            {"X-Auth-Request-Email": "alice@example.org"},
+            [],
+            200,
+            id="auth-enabled-authenticated-no-groups-required",
+        ),
+        pytest.param(
+            True,
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "developer"},
+            ["developer"],
+            200,
+            id="auth-enabled-group-match",
+        ),
+        pytest.param(
+            True,
+            {"X-Auth-Request-Email": "alice@example.org", "X-Auth-Request-Groups": "viewer"},
+            ["developer"],
+            403,
+            id="auth-enabled-group-mismatch",
+        ),
+    ],
+)
+def test_openapi_and_docs_behind_auth(
+    path: str,
+    proxy_auth_enabled: bool,
+    headers: dict[str, str],
+    required_groups: list[str],
+    expected_status: int,
+) -> None:
+    with patch.multiple(
+        "aggregator_proxy.auth.settings",
+        proxy_auth_enabled=proxy_auth_enabled,
+        oidc_required_groups=required_groups,
+        mtls_header="",
+    ):
+        from aggregator_proxy.main import create_app
 
-    def test_callback_requires_mtls_header(self, mock_oidc_provider):
-        """When mTLS is configured and auth enabled, callback rejects without the header."""
-        with _dual_auth_client(mock_oidc_provider) as client:
-            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
-            assert resp.status_code == 401
-
-    def test_callback_accepts_mtls_header(self, mock_oidc_provider):
-        """When mTLS header is present, callback is accessible."""
-        with _dual_auth_client(mock_oidc_provider) as client:
-            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>", headers={"X-Auth-Method": "mTLS"})
-            assert resp.status_code != 401
-
-    def test_callback_does_not_accept_jwt(self, mock_oidc_provider, make_token):
-        """JWT alone is not sufficient for callback — only mTLS is checked."""
-        with _dual_auth_client(mock_oidc_provider) as client:
-            resp = client.post(
-                "/nsi/v2/callback",
-                content=b"<not-xml/>",
-                headers={"Authorization": f"Bearer {make_token()}"},
-            )
-            assert resp.status_code == 401
-
-    def test_callback_passthrough_when_auth_disabled(self):
-        """When auth is disabled, callback is accessible without any headers."""
-        with (
-            patch("aggregator_proxy.routers.reservations._refresh_all_reservations", return_value=[]),
-            TestClient(app, raise_server_exceptions=False) as client,
-        ):
-            _mock_app_state(app)
-            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
-            assert resp.status_code != 401
-
-    def test_callback_mtls_only_config(self):
-        """mTLS-only config (no OIDC): callback requires mTLS header."""
-        with _mtls_only_client() as client:
-            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>")
-            assert resp.status_code == 401
-
-            resp = client.post("/nsi/v2/callback", content=b"<not-xml/>", headers={"X-Auth-Method": "mTLS"})
-            assert resp.status_code != 401
+        scoped_app = create_app()
+        with TestClient(scoped_app, raise_server_exceptions=False) as client:
+            scoped_app.state.nsi_client = _mock_nsi_client()
+            scoped_app.state.callback_client = AsyncMock()
+            scoped_app.state.reservation_store = _mock_reservation_store()
+            assert client.get(path, headers=headers).status_code == expected_status
 
 
 # ---------------------------------------------------------------------------
@@ -515,50 +346,16 @@ class TestCallbackWithAuth:
 # ---------------------------------------------------------------------------
 
 
-class TestCheckGroups:
-    @pytest.mark.parametrize(
-        ("userinfo", "required", "claim", "expected"),
-        [
-            pytest.param({"g": ["admin", "user"]}, ["admin"], "g", ["admin"], id="list-match"),
-            pytest.param({"g": "admin"}, ["admin"], "g", ["admin"], id="string-match"),
-            pytest.param({"g": ["viewer"]}, ["admin"], "g", None, id="no-match"),
-            pytest.param({}, ["admin"], "g", None, id="claim-missing"),
-            pytest.param({"g": ["a", "b", "c"]}, ["c", "d"], "g", ["c"], id="partial-intersection"),
-        ],
-    )
-    def test_check_groups(self, userinfo, required, claim, expected):
-        if expected is not None:
-            assert check_groups(userinfo, required, claim) == expected
-        else:
-            with pytest.raises(Exception, match="403"):
-                check_groups(userinfo, required, claim)
-
-
-# ---------------------------------------------------------------------------
-# Config validation tests
-# ---------------------------------------------------------------------------
-
-
-class TestConfigValidation:
-    @pytest.mark.parametrize(
-        ("input_val", "expected"),
-        [
-            pytest.param('["g1","g2"]', ["g1", "g2"], id="json-array"),
-            pytest.param("g1,g2,g3", ["g1", "g2", "g3"], id="comma-separated"),
-            pytest.param("single-group", ["single-group"], id="single-value"),
-            pytest.param("", [], id="empty-string"),
-        ],
-    )
-    def test_required_groups_parsing(self, input_val, expected):
-        from aggregator_proxy.settings import Settings
-
-        s = Settings(oidc_required_groups=input_val)  # type: ignore[call-arg]
-        assert s.oidc_required_groups == expected
-
-    def test_malformed_json_groups_raises_error(self):
-        from pydantic import ValidationError
-
-        from aggregator_proxy.settings import Settings
-
-        with pytest.raises(ValidationError, match="Invalid JSON"):
-            Settings(oidc_required_groups='["g1", invalid')  # type: ignore[call-arg]
+@pytest.mark.parametrize(
+    ("user_groups", "required", "expected"),
+    [
+        pytest.param(["admin", "user"], ["admin"], ["admin"], id="single-required-match"),
+        pytest.param(["a", "b", "c"], ["c", "d"], ["c"], id="partial-intersection"),
+        pytest.param(["c", "a", "b"], ["a", "b"], ["a", "b"], id="result-is-sorted"),
+        pytest.param(["viewer"], ["admin"], [], id="no-match-returns-empty"),
+        pytest.param([], ["admin"], [], id="empty-user-groups-returns-empty"),
+        pytest.param(["admin"], [], [], id="no-required-groups-returns-empty"),
+    ],
+)
+def test_check_groups(user_groups: list[str], required: list[str], expected: list[str]) -> None:
+    assert check_groups(user_groups, required) == expected

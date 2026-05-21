@@ -97,10 +97,10 @@ stateDiagram-v2
 uv sync
 
 # Run the application
-AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
-  AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
-  AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
-  AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  BASE_URL=https://proxy.example.com \
   uv run aggregator-proxy
 ```
 
@@ -114,10 +114,10 @@ docker build -t nsi-aggregator-proxy .
 
 # Run the container
 docker run -p 8080:8080 \
-  -e AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
-  -e AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
-  -e AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
-  -e AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
+  -e PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  -e REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  -e PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  -e BASE_URL=https://proxy.example.com \
   nsi-aggregator-proxy
 ```
 
@@ -126,13 +126,13 @@ For mTLS, mount the certificate files into the container and set the correspondi
 ```bash
 docker run -p 8080:8080 \
   -v /path/to/certs:/certs:ro \
-  -e AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
-  -e AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
-  -e AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
-  -e AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com \
-  -e AGGREGATOR_PROXY_CLIENT_CERT=/certs/client-certificate.pem \
-  -e AGGREGATOR_PROXY_CLIENT_KEY=/certs/client-private-key.pem \
-  -e AGGREGATOR_PROXY_CA_FILE=/certs/ca-bundle.pem \
+  -e PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  -e REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  -e PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  -e BASE_URL=https://proxy.example.com \
+  -e CLIENT_CERT=/certs/client-certificate.pem \
+  -e CLIENT_KEY=/certs/client-private-key.pem \
+  -e CA_FILE=/certs/ca-bundle.pem \
   nsi-aggregator-proxy
 ```
 
@@ -142,17 +142,17 @@ A Helm chart is included in the `chart/` directory.
 
 ```bash
 helm install nsi-aggregator-proxy ./chart \
-  --set env.AGGREGATOR_PROXY_PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
-  --set env.AGGREGATOR_PROXY_REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
-  --set env.AGGREGATOR_PROXY_PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
-  --set env.AGGREGATOR_PROXY_BASE_URL=https://proxy.example.com
+  --set env.PROVIDER_URL=https://aggregator.example.com/nsi-v2/ConnectionServiceProvider \
+  --set env.REQUESTER_NSA=urn:ogf:network:example.com:2025:requester-nsa \
+  --set env.PROVIDER_NSA=urn:ogf:network:example.com:2025:provider-nsa \
+  --set env.BASE_URL=https://proxy.example.com
 ```
 
-The chart supports Ingress and Gateway API HTTPRoute for external access, and the `envFromSecret` value lets you bind any `AGGREGATOR_PROXY_*` environment variable to a Kubernetes Secret key (entries with an empty `secretName` are skipped, so the list can be safely templated per environment). See `chart/values.yaml` for all available options including mTLS certificate mounting via volumes and volume mounts.
+The chart supports Ingress and Gateway API HTTPRoute for external access, and the `envFromSecret` value lets you bind any environment variable to a Kubernetes Secret key (entries with an empty `secretName` are skipped, so the list can be safely templated per environment). See `chart/values.yaml` for all available options including mTLS certificate mounting via volumes and volume mounts.
 
 ## Configuration
 
-All configuration is via environment variables with the `AGGREGATOR_PROXY_` prefix.
+All configuration is via plain environment variables (no prefix).
 
 Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment the variables you need and fill in the values. The file is read as UTF-8 on startup and must be in the current working directory (the directory from which you run the application). Environment variables take precedence over values in the env file.
 
@@ -160,32 +160,35 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 
 | Variable | Description |
 |---|---|
-| `AGGREGATOR_PROXY_PROVIDER_URL` | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
-| `AGGREGATOR_PROXY_REQUESTER_NSA` | NSA URN used as `requesterNSA` in query requests to the aggregator |
-| `AGGREGATOR_PROXY_PROVIDER_NSA` | NSA URN of the aggregator; used as `providerNSA` in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
-| `AGGREGATOR_PROXY_BASE_URL` | Externally reachable base URL of this proxy (e.g. `https://proxy.example.com`); `/nsi/v2/callback` is appended to form the `replyTo` address in outbound SOAP headers |
+| `PROVIDER_URL` | Full URL of the NSI provider endpoint on the aggregator (e.g. `https://safnari.example.com/nsi-v2/ConnectionServiceProvider`) |
+| `REQUESTER_NSA` | NSA URN used as `requesterNSA` in query requests to the aggregator |
+| `PROVIDER_NSA` | NSA URN of the aggregator; used as `providerNSA` in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
+| `BASE_URL` | Externally reachable base URL of this proxy (e.g. `https://proxy.example.com`); `/nsi/v2/callback` is appended to form the `replyTo` address in outbound SOAP headers |
 
 ### Optional Variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGGREGATOR_PROXY_CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator |
-| `AGGREGATOR_PROXY_CLIENT_KEY` | — | Path to client TLS private key |
-| `AGGREGATOR_PROXY_CA_FILE` | — | Path to CA bundle for server certificate verification |
-| `AGGREGATOR_PROXY_NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
-| `AGGREGATOR_PROXY_DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
-| `AGGREGATOR_PROXY_LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `AGGREGATOR_PROXY_HOST` | `0.0.0.0` | Bind host |
-| `AGGREGATOR_PROXY_PORT` | `8080` | Bind port |
-| `AGGREGATOR_PROXY_ROOT_PATH` | _(empty)_ | ASGI root path prefix. Set when serving behind a reverse proxy that strips a path prefix (e.g. `/aggregator-proxy`). Ensures Swagger UI loads the OpenAPI spec from the correct URL. Does not affect route matching. |
+| `CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator |
+| `CLIENT_KEY` | — | Path to client TLS private key |
+| `CA_FILE` | — | Path to CA bundle for server certificate verification |
+| `NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
+| `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `HOST` | `0.0.0.0` | Bind host |
+| `PORT` | `8080` | Bind port |
+| `ROOT_PATH` | _(empty)_ | ASGI root path prefix. Set when serving behind a reverse proxy that strips a path prefix (e.g. `/aggregator-proxy`). Ensures Swagger UI loads the OpenAPI spec from the correct URL. Does not affect route matching. |
 
 ### Authentication (optional)
 
-The Aggregator Proxy supports two authentication methods: **OIDC** (JWT from oauth2-proxy) and **mTLS** (header from nsi-auth). Authentication is **disabled by default**. When enabled, every request to `/reservations` endpoints must be authenticated via at least one method. The `/health` endpoint is always unauthenticated. The `/nsi/v2/callback` endpoint requires **mTLS only** (not OIDC) when auth is enabled and `MTLS_HEADER` is set — the NSI aggregator is a machine client that authenticates via mutual TLS, not browser-based OIDC.
+The Aggregator Proxy authenticates requests by reading identity headers set by the edge proxy. Browser users authenticate at the portal via Traefik plus oauth2-proxy against an OIDC provider; the NSI aggregator and other machine clients authenticate via mutual TLS with an auth subrequest service (`nsi-auth`) that validates the certificate's DN. The proxy reads the resulting identity headers and applies an optional group check. Authentication is **disabled by default**; when enabled, requests that arrive without trusted identity headers are rejected with 401. `/health` is always unauthenticated. `/nsi/v2/callback` uses a stricter dependency that accepts only the mTLS header — browser/OIDC users are rejected even if they manage to reach the path.
 
 #### Architecture
 
-Two separate nginx ingresses protect the Aggregator Proxy API — one for **mTLS** (machine clients and the NSI aggregator) and one for **OIDC** (browser users). Both converge on the same aggregator-proxy instance, which performs a final authentication check before serving data. The `/nsi/v2/callback` endpoint has a separate mTLS-only auth dependency because it receives async SOAP callbacks from the NSI aggregator, which is a machine client.
+Two separate Traefik routes converge on the same aggregator-proxy instance:
+
+- A **portal route** at `automation.nsi.dev.automation.surf.net/aggregator-proxy` that chains a Headers middleware (stripping inbound auth headers so clients can't self-attest), a ForwardAuth middleware to oauth2-proxy, and a URL-rewrite filter.
+- An **mTLS IngressRoute** that enforces `RequireAndVerifyClientCert`, runs the `nsi-pass-tls` middleware to forward the cert, and chains the `nsi-aggregator-proxy-auth` ForwardAuth middleware to the `nsi-auth` validate sidecar.
 
 ```mermaid
 flowchart TB
@@ -201,128 +204,111 @@ flowchart TB
     Browser(["Browser User"]):::client
     SRAM["SRAM IdP\n(OIDC Provider)"]:::external
 
-    subgraph mTLS_Path["mTLS Ingress — nsi-aggregator-proxy"]
+    subgraph mTLS_Route["Traefik IngressRoute — aggregator-proxy.dev.automation.surf.net"]
         direction TB
-        mNginx["nginx ingress controller\n\nauth-tls-verify-client: on\nauth-tls-secret: nsi-auth CA\nauth-url: nsi-auth /validate\nauth-response-headers:\n  X-Auth-Method, X-Client-DN"]:::ingress
+        mTraefik["TLSOption: RequireAndVerifyClientCert\nMiddlewares:\n  nsi-pass-tls (forwards cert PEM)\n  nsi-aggregator-proxy-auth (ForwardAuth → nsi-auth /validate)\nauthResponseHeaders:\n  X-Auth-Method, X-Client-DN"]:::ingress
     end
 
-    subgraph OIDC_Path["OIDC Ingress — ana-automation-ui"]
+    subgraph Portal_Route["Traefik HTTPRoute — automation.nsi.dev.automation.surf.net/aggregator-proxy"]
         direction TB
-        oNginx["nginx ingress controller\n\nauth-url: oauth2-proxy /oauth2/auth\nauth-response-headers:\n  Authorization,\n  X-Auth-Request-Access-Token\nconfiguration-snippet:\n  proxy_set_header X-Auth-Method \"\""]:::ingress
-        Portal["ana-automation-ui\n(portal landing page)"]:::appsvc
-        BackendIngress["Backend ingresses\n/dds-proxy/* /aggregator-proxy/* ..."]:::ingress
-        oNginx --> Portal
-        Portal --> BackendIngress
+        oTraefik["Middlewares (in order):\n  ana-automation-ui-strip-auth-headers (Headers — zero inbound X-Auth-Request-*, X-Auth-Method, Authorization)\n  ana-automation-ui-oauth2-signin (errors → /oauth2/start)\n  ana-automation-ui-oauth2 (ForwardAuth → oauth2-proxy)\nURLRewrite: /aggregator-proxy → /\nauthResponseHeaders:\n  X-Auth-Request-User, X-Auth-Request-Email, X-Auth-Request-Groups"]:::ingress
     end
 
     subgraph Auth_Services["Auth Services"]
         nsiAuth["nsi-auth\n\nValidates client DN\nagainst allowed list"]:::authsvc
-        OAuth2["oauth2-proxy\n\nManages OIDC session\npass_access_token = true\nset_xauthrequest = true"]:::authsvc
+        OAuth2["oauth2-proxy\n\nManages OIDC session\nset_xauthrequest = true\noidc_groups_claim = eduperson_entitlement"]:::authsvc
     end
 
-    NSI -->|"TLS handshake\n+ client certificate"| mNginx
-    Aggregator -->|"TLS handshake\n+ client certificate"| mNginx
-    Browser -->|"HTTPS\n+ session cookie"| oNginx
+    NSI -->|"TLS + client cert"| mTraefik
+    Aggregator -->|"TLS + client cert"| mTraefik
+    Browser -->|"HTTPS + session cookie"| oTraefik
 
-    mNginx -.->|"auth subrequest\n(DN from ssl-client-subject-dn)"| nsiAuth
-    nsiAuth -.->|"200 OK\nX-Auth-Method: mTLS\nX-Client-DN: CN=..."| mNginx
+    mTraefik -.->|"auth subrequest"| nsiAuth
+    nsiAuth -.->|"200 OK\nX-Auth-Method: mTLS\nX-Client-DN: CN=..."| mTraefik
 
-    oNginx -.->|"auth subrequest"| OAuth2
-    OAuth2 -.->|"200 OK\nAuthorization: Bearer JWT\nX-Auth-Request-Access-Token: ..."| oNginx
-    OAuth2 <-.->|"OIDC login\n+ token refresh"| SRAM
+    oTraefik -.->|"auth subrequest"| OAuth2
+    OAuth2 -.->|"200 OK\nX-Auth-Request-Email: ...\nX-Auth-Request-Groups: ..."| oTraefik
+    OAuth2 <-.->|"OIDC login + token refresh"| SRAM
 
-    subgraph Aggregator_Proxy["aggregator-proxy (AUTH_ENABLED=true)"]
+    subgraph Aggregator_Proxy["aggregator-proxy (PROXY_AUTH_ENABLED=true)"]
         direction TB
-        AuthCheck{"get_authenticated_user\n(/reservations)"}:::decision
-        CallbackAuth{"get_mtls_authenticated_callback\n(/nsi/v2/callback)"}:::decision
-        OIDC_Check["OIDC path\n\nJWT in Authorization or\nX-Auth-Request-Access-Token?\n→ Validate signature, issuer,\n   audience, expiry\n→ Check group membership\n   via userinfo endpoint"]:::appsvc
-        mTLS_Check["mTLS path\n\nX-Auth-Method header present?\n→ Log X-Client-DN for audit"]:::appsvc
-        OK(["200 — Serve data"]):::appsvc
-        Reject(["401 — Unauthorized"]):::client
-        CallbackOK(["200 — Process callback"]):::appsvc
-        CallbackReject(["401 — Unauthorized"]):::client
+        AuthCheck{"get_authenticated_user\n(/reservations, /docs, /openapi.json, /redoc)"}:::decision
+        CallbackAuth{"get_mtls_authenticated_callback\n(/nsi/v2/callback — strict mTLS)"}:::decision
+        OIDC_Check["OIDC path\n\nX-Auth-Request-Email present?\n→ Parse X-Auth-Request-Groups\n→ check OIDC_REQUIRED_GROUPS\n   (set intersection)"]:::appsvc
+        mTLS_Check["mTLS path\n\nMTLS_HEADER present?\n→ Log X-Client-DN for audit"]:::appsvc
+        OK(["200 — Serve"]):::appsvc
+        Reject(["401 / 403"]):::client
 
-        AuthCheck -->|"JWT present"| OIDC_Check
-        AuthCheck -->|"No JWT"| mTLS_Check
-        OIDC_Check -->|"Valid"| OK
-        OIDC_Check -->|"Invalid JWT"| Reject
+        AuthCheck -->|"Email header set"| OIDC_Check
+        AuthCheck -->|"No email"| mTLS_Check
+        OIDC_Check -->|"Group match\nor no groups required"| OK
+        OIDC_Check -->|"Group mismatch"| Reject
         mTLS_Check -->|"Header set"| OK
         mTLS_Check -->|"No header"| Reject
-        CallbackAuth -->|"mTLS header set"| CallbackOK
-        CallbackAuth -->|"No mTLS header"| CallbackReject
+        CallbackAuth -->|"mTLS header set"| OK
+        CallbackAuth -->|"No mTLS header"| Reject
     end
 
-    mNginx -->|"X-Auth-Method: mTLS\nX-Client-DN: CN=...\n(/reservations)"| AuthCheck
-    mNginx -->|"X-Auth-Method: mTLS\nX-Client-DN: CN=...\n(/nsi/v2/callback)"| CallbackAuth
-    BackendIngress -->|"Authorization: Bearer JWT\nX-Auth-Request-Access-Token: ...\n(X-Auth-Method stripped)"| AuthCheck
+    mTraefik -->|"X-Auth-Method, X-Client-DN\n(/reservations)"| AuthCheck
+    mTraefik -->|"X-Auth-Method, X-Client-DN\n(/nsi/v2/callback)"| CallbackAuth
+    oTraefik -->|"X-Auth-Request-Email, X-Auth-Request-Groups"| AuthCheck
 ```
+
+#### Trust model
+
+Authentication is performed at the edge; the proxy trusts the identity headers it receives. The cluster manifests must uphold the following invariants for that trust to hold:
+
+- The portal HTTPRoute runs the `ana-automation-ui-strip-auth-headers` middleware **before** the ForwardAuth middleware, so a client cannot pre-set `X-Auth-Request-Email` / `-Groups` / `-Method`.
+- The aggregator-proxy backend Service is `ClusterIP` and reachable only via the portal HTTPRoute or the mTLS IngressRoute.
+- The mTLS route enforces `RequireAndVerifyClientCert` at the TLS layer.
+- The `/nsi/v2/callback` dependency accepts only the mTLS header, so even a portal-authenticated user reaching that path through Traefik's path-prefix matching cannot deliver forged SOAP callbacks.
+
+The destructive endpoints (`POST /reservations`, `POST /reservations/{id}/provision|release`, `DELETE /reservations/{id}`) are protected against cross-site CSRF by oauth2-proxy's session cookie `SameSite` attribute (default `Lax`). If the gateway is ever reconfigured to `SameSite=None` (e.g. for cross-domain embeds), the backend would need its own CSRF mitigation.
+
+The application logs the authenticated identity and group membership for every request to support audit.
 
 #### Defense-in-depth measures
 
 | Measure | Purpose |
 |---|---|
-| **mTLS ingress verifies client cert** against CA chain before reaching nsi-auth | Only certificates signed by a trusted CA are accepted |
+| **mTLS route enforces `RequireAndVerifyClientCert`** before nsi-auth runs | Only certificates signed by a trusted CA reach the auth service |
 | **nsi-auth validates DN** against an allowed list | Even with a valid cert, only pre-approved clients are authorized |
-| **OIDC ingress strips `X-Auth-Method`** header via `configuration-snippet` | Prevents browser users from spoofing mTLS authentication by injecting the header |
-| **Invalid JWT blocks request** even when `X-Auth-Method` is present | A bad JWT is always rejected — mTLS cannot rescue a failed OIDC attempt |
-| **Callback requires mTLS only** — JWT is not accepted | The NSI aggregator is a machine client; OIDC tokens cannot bypass the mTLS requirement on callbacks |
-| **aggregator-proxy requires at least one method** when `AUTH_ENABLED=true` | No unauthenticated passthrough — every request must prove its identity |
-| **Group-based authorization** via OIDC userinfo endpoint | OIDC users can be restricted to specific SRAM groups |
+| **Portal route's strip-auth-headers middleware** zeroes inbound `X-Auth-Request-*`, `X-Auth-Method`, `X-Client-DN`, and `Authorization` | Clients cannot self-attest by pre-setting trusted headers |
+| **Network isolation** (backend Service is ClusterIP only) | Direct in-cluster access to the backend is required to bypass the edge |
+| **Callback uses a strict-mTLS-only dependency** | OIDC users cannot forge async NSI callbacks even if Traefik routing puts them on `/nsi/v2/callback` |
+| **`/health` is always unauthenticated** | k8s liveness/readiness probes succeed without credentials |
 
 #### Header flow summary
 
 | Header | Set by | Forwarded by | Consumed by |
 |---|---|---|---|
-| `X-Auth-Method: mTLS` | nsi-auth (on 200) | mTLS nginx (`auth-response-headers`) | aggregator-proxy (mTLS auth check on `/reservations` and `/nsi/v2/callback`) |
-| `X-Client-DN` | nsi-auth (on 200) | mTLS nginx (`auth-response-headers`) | aggregator-proxy (audit logging) |
-| `Authorization: Bearer <JWT>` | oauth2-proxy | OIDC nginx (`auth-response-headers`) | aggregator-proxy (OIDC auth check on `/reservations`) |
-| `X-Auth-Request-Access-Token` | oauth2-proxy | OIDC nginx (`auth-response-headers`) | aggregator-proxy (JWT fallback + userinfo lookup) |
+| `X-Auth-Method` | nsi-auth (on 200) | Traefik IngressRoute (`authResponseHeaders`) | aggregator-proxy (mTLS auth on `/reservations` and `/nsi/v2/callback`) |
+| `X-Client-DN` | nsi-auth (on 200) | Traefik IngressRoute (`authResponseHeaders`) | aggregator-proxy (audit logging) |
+| `X-Auth-Request-Email` | oauth2-proxy (`set_xauthrequest = true`) | Traefik HTTPRoute (`authResponseHeaders`) | aggregator-proxy (identity) |
+| `X-Auth-Request-Groups` | oauth2-proxy (`set_xauthrequest = true`, `oidc_groups_claim = eduperson_entitlement`) | Traefik HTTPRoute (`authResponseHeaders`) | aggregator-proxy (group authorization) |
 
 #### Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGGREGATOR_PROXY_AUTH_ENABLED` | `false` | Enable authentication on all reservation endpoints. When `true`, every request must be authenticated via OIDC (JWT) or mTLS (header from nsi-auth). `/health` is always unauthenticated. |
-| `AGGREGATOR_PROXY_MTLS_HEADER` | _(empty)_ | Header name that nsi-auth sets on successful validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication. nsi-auth also sets `X-Client-DN` with the client certificate DN, which is logged for audit purposes. |
-| `AGGREGATOR_PROXY_OIDC_ISSUER` | _(empty)_ | Expected `iss` claim in the JWT. OIDC validation is active when this is set and auth is enabled. |
-| `AGGREGATOR_PROXY_OIDC_AUDIENCE` | _(empty)_ | Expected `aud` claim in the JWT. |
-| `AGGREGATOR_PROXY_OIDC_JWKS_URI` | _(empty)_ | JWKS endpoint URL. Auto-discovered from `{OIDC_ISSUER}/.well-known/openid-configuration` if empty. |
-| `AGGREGATOR_PROXY_OIDC_USERINFO_URI` | _(empty)_ | Userinfo endpoint URL. Auto-discovered from the OIDC configuration if empty. |
-| `AGGREGATOR_PROXY_OIDC_GROUP_CLAIM` | `eduperson_entitlement` | Claim name in the userinfo response that contains group memberships. |
-| `AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS` | `[]` | Groups required for access. Supports comma-separated (`g1,g2`) or JSON array (`["g1","g2"]`). Use `[]` for no group check (any authenticated user is allowed). **Note:** pydantic-settings JSON-parses `list` env vars, so an empty string will cause a startup error — always use `[]` instead. |
-| `AGGREGATOR_PROXY_OIDC_JWKS_CACHE_LIFESPAN` | `300` | JWKS key cache TTL in seconds. |
-| `AGGREGATOR_PROXY_OIDC_USERINFO_CACHE_TTL` | `60` | Userinfo response cache TTL in seconds. |
+| `PROXY_AUTH_ENABLED` | `false` | Enable authentication on the data endpoints and on `/openapi.json` / `/docs` / `/redoc`. When `true`, every request to these paths must carry trusted identity headers (OIDC path) or the mTLS header, and must satisfy `OIDC_REQUIRED_GROUPS` when set. `/health` is always unauthenticated. The `/nsi/v2/callback` endpoint always uses a stricter mTLS-only check. |
+| `MTLS_HEADER` | _(empty)_ | Header name that nsi-auth sets on successful validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication. nsi-auth also sets `X-Client-DN`, which is logged for audit purposes. |
+| `OIDC_REQUIRED_GROUPS` | `[]` | Groups required for OIDC-authenticated access. Supports comma-separated (`g1,g2`) or JSON array (`["g1","g2"]`). Use `[]` for no group check (any authenticated user is allowed). Matched against the parsed `X-Auth-Request-Groups` header (comma- or whitespace-separated). **When MCP is enabled this list must also contain the group URNs returned by the MCP IdP** — a single list gates both surfaces. **Note:** pydantic-settings JSON-parses `list` env vars, so an empty string will cause a startup error — always use `[]` instead. |
 
-**Authentication flow** for `/reservations` when `AUTH_ENABLED=true`:
+**Authentication flow** when `PROXY_AUTH_ENABLED=true`:
 
-1. **OIDC path** (if `OIDC_ISSUER` is set): Check for a JWT in the `Authorization: Bearer` header, falling back to `X-Auth-Request-Access-Token` (set by oauth2-proxy). If a token is present, validate it for signature, issuer, audience, and expiry. The `X-Auth-Request-Access-Token` fallback is needed because the nginx ingress controller has a [known issue](https://github.com/kubernetes/ingress-nginx/issues/13163) where it clears the `Authorization` header from auth subrequest responses. If a token is present but invalid, the request is rejected (mTLS does not override a bad JWT).
-2. **mTLS path** (if `MTLS_HEADER` is set): Check for the configured header (e.g. `X-Auth-Method`). This header is set by nsi-auth and forwarded by nginx via `auth-response-headers`. The client certificate DN from `X-Client-DN` is logged for audit.
-3. **Neither**: If no valid credentials are found, the request is rejected with 401.
-
-**Authentication flow** for `/nsi/v2/callback` when `AUTH_ENABLED=true`:
-
-The callback endpoint uses a separate, mTLS-only auth dependency. If `MTLS_HEADER` is set, the configured header must be present. OIDC tokens are not checked — the NSI aggregator is a machine client that authenticates via mutual TLS.
-
-**Access token for group authorization:** When `OIDC_REQUIRED_GROUPS` is set, the proxy needs an access token (via `X-Auth-Request-Access-Token`) to call the OIDC userinfo endpoint for group membership. This header is set by oauth2-proxy when `set_xauthrequest = true` and `pass_access_token = true`. If a valid JWT is present but the access token header is missing, the request is rejected with 401.
+1. **OIDC path** (`/reservations`, `/docs`, `/openapi.json`, `/redoc`): If `X-Auth-Request-Email` is present, the request is authenticated. If `OIDC_REQUIRED_GROUPS` is non-empty, the user's `X-Auth-Request-Groups` must intersect with the required groups; otherwise 403.
+2. **mTLS path** (`/reservations` when `MTLS_HEADER` is set): If the configured header is present, the request is authenticated. The client certificate DN from `X-Client-DN` is logged for audit.
+3. **Callback** (`/nsi/v2/callback`): Strict mTLS only. The `MTLS_HEADER` must be present; OIDC headers are never accepted on this path.
+4. **Neither**: If no trusted identity is present, the request is rejected with 401.
 
 #### Error responses
 
-When authentication is enabled, endpoints may return these error responses:
-
 | Status | Detail | Cause |
 |---|---|---|
-| `401` | `Token expired` | JWT `exp` claim is in the past |
-| `401` | `Invalid audience` | JWT `aud` claim does not match `OIDC_AUDIENCE` |
-| `401` | `Invalid issuer` | JWT `iss` claim does not match `OIDC_ISSUER` |
-| `401` | `Invalid token: <reason>` | Other JWT validation failures (missing required claims, bad signature, etc.) |
-| `401` | `Token validation failed` | JWKS key retrieval failed (endpoint unreachable, key not found) |
-| `401` | `Missing access token for group lookup` | Group authorization required but `X-Auth-Request-Access-Token` header missing |
-| `401` | `Authentication required` | No valid credentials found on `/reservations` (no JWT, no mTLS header) |
+| `401` | `Authentication required` | No trusted identity headers and no mTLS header found on `/reservations` (or `/docs` / `/openapi.json` / `/redoc`) |
 | `401` | `mTLS authentication required` | No mTLS header on `/nsi/v2/callback` |
 | `403` | `Insufficient group membership` | User not in any of the required groups |
-| `502` | `Failed to fetch user information` | Userinfo endpoint unreachable or returned an error |
-
-**Defense-in-depth:** The OIDC ingress should strip the `X-Auth-Method` header to prevent clients from spoofing mTLS authentication. With nginx, use `configuration-snippet: proxy_set_header X-Auth-Method "";`. With Traefik, use a Headers middleware with `customRequestHeaders: { X-Auth-Method: "" }`.
 
 ## MCP Endpoint (optional)
 
@@ -339,15 +325,18 @@ All state-changing operations (POST, DELETE) and the NSI callback endpoint are e
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGGREGATOR_PROXY_MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
-| `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and must not end with `/`. |
-| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the configured OIDC issuer, audience, and JWKS URI. Group-based authorization (`OIDC_REQUIRED_GROUPS`) is not supported on the MCP endpoint; see startup validation below. |
+| `MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
+| `MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and must not end with `/`. |
+| `MCP_AUTH_ENABLED` | `false` | Validate incoming MCP JWTs via `fastmcp.JWTVerifier`. **Must be `true` whenever `PROXY_AUTH_ENABLED=true` and `MCP_ENABLED=true`** (the Settings model validator refuses the unsafe combination at startup). |
+| `MCP_OIDC_JWKS_URI` | _(empty)_ | JWKS URI for the MCP OIDC provider (separate from the portal IdP). |
+| `MCP_OIDC_ISSUER` | _(empty)_ | Expected `iss` claim for MCP-issued JWTs. |
+| `MCP_OIDC_AUDIENCE` | _(empty)_ | Expected `aud` claim for MCP-issued JWTs. |
+| `MCP_OIDC_EMAIL_CLAIM` | `email` | Claim name read from the MCP JWT and forwarded as `X-Auth-Request-Email` on the internal MCP→REST call. |
+| `MCP_OIDC_GROUPS_CLAIM` | `groups` | Claim name read from the MCP JWT and forwarded as `X-Auth-Request-Groups` on the internal MCP→REST call. |
 
-**Startup validation:** the proxy refuses to start when any of these hold:
+**MCP as a local gateway.** When an AI agent calls an MCP tool that maps to `GET /reservations`, fastmcp validates the JWT (signature/issuer/audience/expiry) and then makes an internal HTTP call to the REST handler. An httpx event hook (`_forward_user_identity`) decodes the validated JWT's payload, reads the email and groups claims (names configured via `MCP_OIDC_EMAIL_CLAIM` / `MCP_OIDC_GROUPS_CLAIM`), and sets `X-Auth-Request-Email` and `X-Auth-Request-Groups` on the internal request. `Authorization` is dropped on the internal call. REST then runs the same `get_authenticated_user` dependency as the portal path — so the group check against `OIDC_REQUIRED_GROUPS` enforces the same policy for both surfaces. For this to work, `OIDC_REQUIRED_GROUPS` must include the MCP IdP's group URNs alongside the portal's.
 
-- `AUTH_ENABLED=true` and `MCP_AUTH_ENABLED=false` — would expose authenticated data via an unauthenticated MCP endpoint.
-- `MCP_AUTH_ENABLED=true` and `OIDC_JWKS_URI` empty — OIDC discovery only runs in the async lifespan, but `JWTVerifier` needs the JWKS URI at module load time.
-- `MCP_AUTH_ENABLED=true` and `OIDC_REQUIRED_GROUPS` non-empty — `JWTVerifier` validates the JWT but does not call the userinfo endpoint, and only the `Authorization` header is forwarded to the internal `/reservations` call. The userinfo group lookup in `get_authenticated_user` would therefore never succeed, so the combination is rejected explicitly rather than producing opaque 401s at request time.
+**Startup validation.** The Settings model refuses to construct when `PROXY_AUTH_ENABLED=true` *and* `MCP_ENABLED=true` *and* `MCP_AUTH_ENABLED=false`. In that combination fastmcp wouldn't validate the JWT and the claim-translation hook would forward attacker-supplied claims as trusted REST headers — a privilege-escalation path. Fail fast at startup with a clear error message instead.
 
 ### Minimal client example
 
@@ -412,7 +401,7 @@ All fields are required except `globalReservationId` and `serviceType`.
 | `criteria.p2ps.sourceSTP` | string | Yes | Source Service Termination Point (Network URN) |
 | `criteria.p2ps.destSTP` | string | Yes | Destination Service Termination Point (Network URN) |
 | `requesterNSA` | string | Yes | NSA URN of the requesting party |
-| `providerNSA` | string | Yes | NSA URN of the target aggregator; must match `AGGREGATOR_PROXY_PROVIDER_NSA` |
+| `providerNSA` | string | Yes | NSA URN of the target aggregator; must match `PROVIDER_NSA` |
 | `callbackURL` | string | Yes | URL where the reservation result will be delivered |
 
 #### Response

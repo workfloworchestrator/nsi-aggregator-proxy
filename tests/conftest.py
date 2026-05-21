@@ -20,10 +20,10 @@ from __future__ import annotations
 import os
 
 # Set required environment variables before any application module is imported.
-os.environ.setdefault("AGGREGATOR_PROXY_PROVIDER_URL", "http://aggregator.test/nsi-v2/ConnectionServiceProvider")
-os.environ.setdefault("AGGREGATOR_PROXY_BASE_URL", "http://proxy.test")
-os.environ.setdefault("AGGREGATOR_PROXY_REQUESTER_NSA", "urn:ogf:network:example.net:2025:nsa:requester")
-os.environ.setdefault("AGGREGATOR_PROXY_PROVIDER_NSA", "urn:ogf:network:example.net:2025:nsa:provider")
+os.environ.setdefault("PROVIDER_URL", "http://aggregator.test/nsi-v2/ConnectionServiceProvider")
+os.environ.setdefault("BASE_URL", "http://proxy.test")
+os.environ.setdefault("REQUESTER_NSA", "urn:ogf:network:example.net:2025:nsa:requester")
+os.environ.setdefault("PROVIDER_NSA", "urn:ogf:network:example.net:2025:nsa:provider")
 
 import pytest  # noqa: E402
 

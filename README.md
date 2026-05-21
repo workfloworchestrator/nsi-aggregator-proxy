@@ -324,6 +324,57 @@ When authentication is enabled, endpoints may return these error responses:
 
 **Defense-in-depth:** The OIDC ingress should strip the `X-Auth-Method` header to prevent clients from spoofing mTLS authentication. With nginx, use `configuration-snippet: proxy_set_header X-Auth-Method "";`. With Traefik, use a Headers middleware with `customRequestHeaders: { X-Auth-Method: "" }`.
 
+## MCP Endpoint (optional)
+
+The Aggregator Proxy can expose its read-only reservation endpoints as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, mounted at `/mcp`. This lets AI agents (Claude Desktop, custom agents using `fastmcp.Client`, etc.) list and inspect reservations as MCP **Resources**.
+
+Only the two GET operations are exposed:
+
+- `GET /reservations` → MCP Resource `list_reservations`
+- `GET /reservations/{connectionId}` → MCP ResourceTemplate `get_reservation`
+
+All state-changing operations (POST, DELETE) and the NSI callback endpoint are explicitly excluded from MCP.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGGREGATOR_PROXY_MCP_ENABLED` | `false` | Mount the MCP sub-app. Opt-in; the feature is disabled by default. |
+| `AGGREGATOR_PROXY_MCP_PATH` | `/mcp` | Mount path for the MCP sub-app. Must start with `/` and must not end with `/`. |
+| `AGGREGATOR_PROXY_MCP_AUTH_ENABLED` | `false` | Require an OIDC JWT on the MCP endpoint. Validated by FastMCP's `JWTVerifier` using the configured OIDC issuer, audience, and JWKS URI. Group-based authorization (`OIDC_REQUIRED_GROUPS`) is not supported on the MCP endpoint; see startup validation below. |
+
+**Startup validation:** the proxy refuses to start when any of these hold:
+
+- `AUTH_ENABLED=true` and `MCP_AUTH_ENABLED=false` — would expose authenticated data via an unauthenticated MCP endpoint.
+- `MCP_AUTH_ENABLED=true` and `OIDC_JWKS_URI` empty — OIDC discovery only runs in the async lifespan, but `JWTVerifier` needs the JWKS URI at module load time.
+- `MCP_AUTH_ENABLED=true` and `OIDC_REQUIRED_GROUPS` non-empty — `JWTVerifier` validates the JWT but does not call the userinfo endpoint, and only the `Authorization` header is forwarded to the internal `/reservations` call. The userinfo group lookup in `get_authenticated_user` would therefore never succeed, so the combination is rejected explicitly rather than producing opaque 401s at request time.
+
+### Minimal client example
+
+```python
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+
+transport = StreamableHttpTransport(
+    url="https://proxy.example.com/mcp/",
+    headers={"Authorization": "Bearer <your-token>"},
+)
+
+async with Client(transport) as client:
+    # Discover the list resource and read it
+    resources = await client.list_resources()
+    list_resource = next(r for r in resources if r.name == "list_reservations")
+    contents = await client.read_resource(list_resource.uri)
+    print(contents[0].text)
+
+    # Or read a single reservation by filling in the URI template
+    templates = await client.list_resource_templates()
+    get_template = next(t for t in templates if t.name == "get_reservation")
+    uri = get_template.uriTemplate.replace("{connectionId}", "<your-connection-id>")
+    contents = await client.read_resource(uri)
+    print(contents[0].text)
+```
+
 ## API Endpoints
 
 ### POST /reservations

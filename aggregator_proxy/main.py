@@ -25,9 +25,11 @@ import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from fastmcp.utilities.lifespan import combine_lifespans
 
 from aggregator_proxy.auth import OIDCProvider, get_authenticated_user, get_mtls_authenticated_callback
 from aggregator_proxy.logging_config import configure_logging
+from aggregator_proxy.mcp_server import build_mcp
 from aggregator_proxy.nsi_client import create_nsi_client
 from aggregator_proxy.reservation_store import ReservationStore
 from aggregator_proxy.routers import reservations
@@ -143,6 +145,46 @@ async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError)
 async def health() -> Response:
     """Liveness probe endpoint."""
     return Response(status_code=200)
+
+
+def _validate_mcp_settings() -> None:
+    """Refuse to start when MCP/REST auth flags are inconsistent.
+
+    Raises:
+        SystemExit: If REST auth is enabled but MCP auth is not, if MCP auth
+            is enabled without an explicit OIDC JWKS URI, or if MCP auth is
+            enabled while OIDC group authorization is required. FastMCP's
+            ``JWTVerifier`` validates the token but does not call the userinfo
+            endpoint, and the token-forwarding event hook only forwards the
+            ``Authorization`` header — not the ``X-Auth-Request-Access-Token``
+            header that ``get_authenticated_user`` requires for the userinfo
+            group lookup. The internal call would therefore always 401, so we
+            fail fast instead.
+    """
+    if settings.auth_enabled and not settings.mcp_auth_enabled:
+        raise SystemExit("AGGREGATOR_PROXY_MCP_AUTH_ENABLED must be true when AGGREGATOR_PROXY_AUTH_ENABLED is true")
+    if settings.mcp_auth_enabled and not settings.oidc_jwks_uri:
+        raise SystemExit(
+            "AGGREGATOR_PROXY_OIDC_JWKS_URI must be set explicitly when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true"
+        )
+    if settings.mcp_auth_enabled and settings.oidc_required_groups:
+        raise SystemExit(
+            "AGGREGATOR_PROXY_OIDC_REQUIRED_GROUPS must be empty when AGGREGATOR_PROXY_MCP_AUTH_ENABLED is true; "
+            "group-based authorization is not enforced on the MCP endpoint"
+        )
+
+
+def _setup_mcp(app: FastAPI) -> None:
+    """Validate MCP settings, build the MCP sub-app, and mount it on `app`."""
+    _validate_mcp_settings()
+    mcp_app = build_mcp(app).http_app(path="/")
+    original_lifespan = app.router.lifespan_context
+    app.router.lifespan_context = combine_lifespans(original_lifespan, mcp_app.lifespan)
+    app.mount(settings.mcp_path, mcp_app)
+
+
+if settings.mcp_enabled:
+    _setup_mcp(app)
 
 
 def run() -> None:

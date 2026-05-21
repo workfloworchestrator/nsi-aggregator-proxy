@@ -94,3 +94,44 @@ def test_env_file_read_as_utf8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_env_file_encoding_configured() -> None:
     """The Settings model is configured to read env files as UTF-8."""
     assert Settings.model_config.get("env_file_encoding") == "utf-8"
+
+
+def test_mcp_settings_defaults() -> None:
+    """MCP settings default to disabled with the standard /mcp path."""
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mcp_enabled is False
+    assert s.mcp_path == "/mcp"
+    assert s.mcp_auth_enabled is False
+
+
+def test_mcp_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP settings can be overridden via AGGREGATOR_PROXY_MCP_* env vars."""
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_ENABLED", "true")
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_PATH", "/custom-mcp")
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_AUTH_ENABLED", "true")
+
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mcp_enabled is True
+    assert s.mcp_path == "/custom-mcp"
+    assert s.mcp_auth_enabled is True
+
+
+def test_mcp_path_requires_leading_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP_PATH without a leading slash is rejected so app.mount behaves predictably."""
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_PATH", "mcp")
+    with pytest.raises(ValueError, match="MCP_PATH must start with '/'"):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_mcp_path_rejects_trailing_slash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MCP_PATH with a trailing slash is rejected to avoid mount-path ambiguity."""
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_PATH", "/mcp/")
+    with pytest.raises(ValueError, match="MCP_PATH must not end with '/'"):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_mcp_path_root_slash_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare '/' is accepted (mounting at root); only longer paths must lack a trailing slash."""
+    monkeypatch.setenv("AGGREGATOR_PROXY_MCP_PATH", "/")
+    s = Settings()  # type: ignore[call-arg]
+    assert s.mcp_path == "/"

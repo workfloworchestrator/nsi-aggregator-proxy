@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import httpx
 import pytest
 
 from aggregator_proxy.main import app
@@ -62,3 +65,76 @@ async def test_no_event_hook_when_auth_disabled(monkeypatch: pytest.MonkeyPatch)
 
     hooks = captured["httpx_client_kwargs"].get("event_hooks", {})
     assert "request" not in hooks or not hooks["request"]
+
+
+async def test_forward_user_token_no_mcp_context_leaves_request_unchanged() -> None:
+    """When no MCP request context is in flight, the hook is a no-op."""
+    from aggregator_proxy.mcp_server import _forward_user_token
+
+    outgoing = httpx.Request("GET", "http://example.com")
+    original_headers = dict(outgoing.headers)
+
+    await _forward_user_token(outgoing)
+
+    assert dict(outgoing.headers) == original_headers
+    assert "Authorization" not in outgoing.headers
+
+
+async def test_forward_user_token_missing_incoming_request_leaves_request_unchanged() -> None:
+    """When the MCP context exists but has no .request attribute, the hook is a no-op."""
+    from fastmcp.server.context import request_ctx
+
+    from aggregator_proxy.mcp_server import _forward_user_token
+
+    fake_ctx = SimpleNamespace(request=None)
+    token_obj = request_ctx.set(fake_ctx)
+    try:
+        outgoing = httpx.Request("GET", "http://example.com")
+        original_headers = dict(outgoing.headers)
+
+        await _forward_user_token(outgoing)
+
+        assert dict(outgoing.headers) == original_headers
+        assert "Authorization" not in outgoing.headers
+    finally:
+        request_ctx.reset(token_obj)
+
+
+async def test_forward_user_token_missing_authorization_header_leaves_request_unchanged() -> None:
+    """When the incoming MCP request has no Authorization header, the hook is a no-op."""
+    from fastmcp.server.context import request_ctx
+
+    from aggregator_proxy.mcp_server import _forward_user_token
+
+    incoming = SimpleNamespace(headers={})
+    fake_ctx = SimpleNamespace(request=incoming)
+    token_obj = request_ctx.set(fake_ctx)
+    try:
+        outgoing = httpx.Request("GET", "http://example.com")
+        original_headers = dict(outgoing.headers)
+
+        await _forward_user_token(outgoing)
+
+        assert dict(outgoing.headers) == original_headers
+        assert "Authorization" not in outgoing.headers
+    finally:
+        request_ctx.reset(token_obj)
+
+
+async def test_forward_user_token_copies_authorization_header() -> None:
+    """When the incoming MCP request has an Authorization header, it is copied onto the outgoing request."""
+    from fastmcp.server.context import request_ctx
+
+    from aggregator_proxy.mcp_server import _forward_user_token
+
+    incoming = SimpleNamespace(headers={"authorization": "Bearer test-token"})
+    fake_ctx = SimpleNamespace(request=incoming)
+    token_obj = request_ctx.set(fake_ctx)
+    try:
+        outgoing = httpx.Request("GET", "http://example.com")
+
+        await _forward_user_token(outgoing)
+
+        assert outgoing.headers["Authorization"] == "Bearer test-token"
+    finally:
+        request_ctx.reset(token_obj)

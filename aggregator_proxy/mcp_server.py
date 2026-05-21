@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 from fastapi import FastAPI
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 from fastmcp.server.context import request_ctx
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
@@ -44,6 +46,22 @@ async def _forward_user_token(request: httpx.Request) -> None:
         request.headers["Authorization"] = token
 
 
+def _build_auth() -> AuthProvider | None:
+    """Build an MCP-level OIDC auth provider, or None if MCP auth is disabled.
+
+    Returns a ``JWTVerifier`` that validates incoming MCP request tokens against the
+    configured OIDC issuer/audience using the JWKS endpoint. ``JWTVerifier`` is itself
+    an ``AuthProvider``, so it can be passed directly to ``FastMCP`` as ``auth``.
+    """
+    if not settings.mcp_auth_enabled:
+        return None
+    return JWTVerifier(
+        jwks_uri=settings.oidc_jwks_uri,
+        issuer=settings.oidc_issuer,
+        audience=settings.oidc_audience,
+    )
+
+
 def build_mcp(api: FastAPI) -> FastMCP:
     """Build a FastMCP server from the given FastAPI app, exposing only GET /reservations."""
     httpx_kwargs: dict[str, Any] = {}
@@ -53,6 +71,7 @@ def build_mcp(api: FastAPI) -> FastMCP:
     return FastMCP.from_fastapi(
         app=api,
         name="NSI Aggregator Proxy",
+        auth=_build_auth(),
         route_maps=[
             RouteMap(methods=["GET"], pattern=_DETAIL_PATTERN, mcp_type=MCPType.RESOURCE_TEMPLATE),
             RouteMap(methods=["GET"], pattern=_LIST_PATTERN, mcp_type=MCPType.RESOURCE),

@@ -138,3 +138,32 @@ async def test_forward_user_token_copies_authorization_header() -> None:
         assert outgoing.headers["Authorization"] == "Bearer test-token"
     finally:
         request_ctx.reset(token_obj)
+
+
+async def test_mcp_has_auth_provider_when_mcp_auth_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When mcp_auth_enabled=true, the FastMCP server is configured with an auth provider."""
+    from aggregator_proxy import mcp_server
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "mcp_auth_enabled", True)
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_issuer", "https://idp.example.com")
+    monkeypatch.setattr(settings, "oidc_audience", "test-audience")
+    monkeypatch.setattr(settings, "oidc_jwks_uri", "https://idp.example.com/jwks")
+
+    mcp = mcp_server.build_mcp(app)
+
+    assert mcp.auth is not None, "expected MCP server to have an auth provider configured"
+
+
+async def test_mcp_has_no_auth_provider_when_mcp_auth_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When mcp_auth_enabled=false, the FastMCP server has no auth provider."""
+    from aggregator_proxy import mcp_server
+    from aggregator_proxy.settings import settings
+
+    monkeypatch.setattr(settings, "mcp_auth_enabled", False)
+    monkeypatch.setattr(settings, "auth_enabled", False)
+
+    mcp = mcp_server.build_mcp(app)
+
+    assert mcp.auth is None

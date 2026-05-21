@@ -23,6 +23,7 @@ from collections.abc import Callable
 import httpx
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import McpError
 
 from aggregator_proxy.main import app
 from aggregator_proxy.mcp_server import build_mcp
@@ -102,7 +103,7 @@ async def test_get_reservation_unknown_id_errors(_app_with_reservation: None) ->
         templates = await client.list_resource_templates()
         get_template = next(t for t in templates if t.name == "get_reservation")
         uri = get_template.uriTemplate.replace("{connectionId}", "does-not-exist")
-        with pytest.raises(Exception) as excinfo:
+        with pytest.raises(McpError) as excinfo:
             await client.read_resource(uri)
     msg = str(excinfo.value)
     assert "404" in msg or "not found" in msg.lower()

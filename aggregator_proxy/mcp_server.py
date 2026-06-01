@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""FastMCP sub-app builder exposing GET /reservations as MCP Resources."""
+"""FastMCP sub-app builder exposing GET /reservations as MCP Tools."""
 
 from __future__ import annotations
 
@@ -93,7 +93,13 @@ def _build_auth() -> AuthProvider | None:
 
 
 def build_mcp(api: FastAPI) -> FastMCP:
-    """Build a FastMCP server from the given FastAPI app, exposing only GET /reservations."""
+    """Build a FastMCP server from the given FastAPI app, exposing only GET /reservations as Tools.
+
+    Both GET endpoints are mapped to ``MCPType.TOOL`` rather than Resources: the
+    default FastMCP surface is tools, and many LLM clients (e.g. Claude Desktop)
+    only support the tools half of the MCP spec, so resources would be unreachable
+    from them. Everything else is excluded.
+    """
     httpx_kwargs: dict[str, Any] = {}
     if settings.proxy_auth_enabled:
         httpx_kwargs["event_hooks"] = {"request": [_forward_user_identity]}
@@ -103,8 +109,8 @@ def build_mcp(api: FastAPI) -> FastMCP:
         name="NSI Aggregator Proxy",
         auth=_build_auth(),
         route_maps=[
-            RouteMap(methods=["GET"], pattern=_DETAIL_PATTERN, mcp_type=MCPType.RESOURCE_TEMPLATE),
-            RouteMap(methods=["GET"], pattern=_LIST_PATTERN, mcp_type=MCPType.RESOURCE),
+            RouteMap(methods=["GET"], pattern=_DETAIL_PATTERN, mcp_type=MCPType.TOOL),
+            RouteMap(methods=["GET"], pattern=_LIST_PATTERN, mcp_type=MCPType.TOOL),
             RouteMap(mcp_type=MCPType.EXCLUDE),
         ],
         httpx_client_kwargs=httpx_kwargs,

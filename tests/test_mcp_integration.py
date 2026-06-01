@@ -17,13 +17,12 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 
 import httpx
 import pytest
 from fastmcp import Client
-from fastmcp.exceptions import McpError
+from fastmcp.exceptions import ToolError
 
 from aggregator_proxy.main import app
 from aggregator_proxy.mcp_server import build_mcp
@@ -73,37 +72,28 @@ def _app_with_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_list_reservations_via_mcp(_app_with_reservation: None) -> None:
     mcp = build_mcp(app)
     async with Client(mcp) as client:
-        resources = await client.list_resources()
-        list_resource = next(r for r in resources if r.name == "list_reservations")
-        contents = await client.read_resource(list_resource.uri)
+        result = await client.call_tool("list_reservations")
 
-    payload = json.loads(contents[0].text)
-    assert "reservations" in payload
-    ids = [r["connectionId"] for r in payload["reservations"]]
+    payload = result.data
+    ids = [r.connectionId for r in payload.reservations]
     assert CONNECTION_ID in ids
 
 
 async def test_get_reservation_via_mcp(_app_with_reservation: None) -> None:
     mcp = build_mcp(app)
     async with Client(mcp) as client:
-        templates = await client.list_resource_templates()
-        get_template = next(t for t in templates if t.name == "get_reservation")
-        uri = get_template.uriTemplate.replace("{connectionId}", CONNECTION_ID)
-        contents = await client.read_resource(uri)
+        result = await client.call_tool("get_reservation", {"connectionId": CONNECTION_ID})
 
-    payload = json.loads(contents[0].text)
-    assert payload["connectionId"] == CONNECTION_ID
-    assert payload["description"] == "integration test"
+    payload = result.data
+    assert payload.connectionId == CONNECTION_ID
+    assert payload.description == "integration test"
 
 
 async def test_get_reservation_unknown_id_errors(_app_with_reservation: None) -> None:
-    """A missing connection ID surfaces as an MCP error (not a silent empty result)."""
+    """A missing connection ID surfaces as a tool error (not a silent empty result)."""
     mcp = build_mcp(app)
     async with Client(mcp) as client:
-        templates = await client.list_resource_templates()
-        get_template = next(t for t in templates if t.name == "get_reservation")
-        uri = get_template.uriTemplate.replace("{connectionId}", "does-not-exist")
-        with pytest.raises(McpError) as excinfo:
-            await client.read_resource(uri)
+        with pytest.raises(ToolError) as excinfo:
+            await client.call_tool("get_reservation", {"connectionId": "does-not-exist"})
     msg = str(excinfo.value)
     assert "404" in msg or "not found" in msg.lower()

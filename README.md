@@ -312,12 +312,12 @@ The application logs the authenticated identity and group membership for every r
 
 ## MCP Endpoint (optional)
 
-The Aggregator Proxy can expose its read-only reservation endpoints as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, mounted at `/mcp`. This lets AI agents (Claude Desktop, custom agents using `fastmcp.Client`, etc.) list and inspect reservations as MCP **Resources**.
+The Aggregator Proxy can expose its read-only reservation endpoints as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, mounted at `/mcp`. This lets AI agents (Claude Desktop, custom agents using `fastmcp.Client`, etc.) list and inspect reservations via MCP **Tools**.
 
-Only the two GET operations are exposed:
+Only the two GET operations are exposed, both as Tools (the surface every MCP client supports, including Claude Desktop):
 
-- `GET /reservations` → MCP Resource `list_reservations`
-- `GET /reservations/{connectionId}` → MCP ResourceTemplate `get_reservation`
+- `GET /reservations` → MCP Tool `list_reservations`
+- `GET /reservations/{connectionId}` → MCP Tool `get_reservation` (takes a `connectionId` argument)
 
 All state-changing operations (POST, DELETE) and the NSI callback endpoint are explicitly excluded from MCP.
 
@@ -350,18 +350,13 @@ transport = StreamableHttpTransport(
 )
 
 async with Client(transport) as client:
-    # Discover the list resource and read it
-    resources = await client.list_resources()
-    list_resource = next(r for r in resources if r.name == "list_reservations")
-    contents = await client.read_resource(list_resource.uri)
-    print(contents[0].text)
+    # List all reservations
+    result = await client.call_tool("list_reservations")
+    print(result.data)
 
-    # Or read a single reservation by filling in the URI template
-    templates = await client.list_resource_templates()
-    get_template = next(t for t in templates if t.name == "get_reservation")
-    uri = get_template.uriTemplate.replace("{connectionId}", "<your-connection-id>")
-    contents = await client.read_resource(uri)
-    print(contents[0].text)
+    # Or fetch a single reservation by connection ID
+    result = await client.call_tool("get_reservation", {"connectionId": "<your-connection-id>"})
+    print(result.data)
 ```
 
 ## API Endpoints

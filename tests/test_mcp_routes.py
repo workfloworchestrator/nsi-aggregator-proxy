@@ -13,7 +13,7 @@
 # limitations under the License.
 
 
-"""Tests that build_mcp exposes only the two GET /reservations operations."""
+"""Tests that build_mcp exposes only the two GET /reservations operations as Tools."""
 
 from __future__ import annotations
 
@@ -44,6 +44,6 @@ async def test_only_get_reservations_are_exposed(_mcp_disabled_auth) -> None:
     template_names = {t.name for t in templates}
     tool_names = {t.name for t in tools}
 
-    assert resource_names == {"list_reservations"}
-    assert template_names == {"get_reservation"}
-    assert tool_names == set(), f"expected no tools but got: {tool_names}"
+    assert tool_names == {"list_reservations", "get_reservation"}
+    assert resource_names == set(), f"expected no resources but got: {resource_names}"
+    assert template_names == set(), f"expected no resource templates but got: {template_names}"

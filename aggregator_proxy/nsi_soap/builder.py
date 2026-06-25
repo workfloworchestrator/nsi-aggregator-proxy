@@ -146,3 +146,8 @@ def build_query_notification_sync(header: NsiHeader, connection_id: str) -> byte
     etree.SubElement(qns, "startNotificationId").text = "1"
     etree.SubElement(qns, "endNotificationId").text = "2147483647"
     return _serialize(envelope)
+
+
+def build_query_result_sync(header: NsiHeader, connection_id: str | None = None) -> bytes:
+    """Build a NSI queryResultSync request envelope."""
+    return _build_optional_connection_id_operation(header, "queryResultSync", connection_id)

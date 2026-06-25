@@ -44,8 +44,10 @@ from aggregator_proxy.nsi_soap import (
     ChildSegment,
     DataPlaneStateChange,
     ErrorEvent,
+    Notifications,
     NsiHeader,
     NsiMessage,
+    OperationResult,
     ProvisionConfirmed,
     QueryRecursiveResult,
     QueryReservation,
@@ -62,6 +64,7 @@ from aggregator_proxy.nsi_soap import (
     build_provision,
     build_query_notification_sync,
     build_query_recursive,
+    build_query_result_sync,
     build_query_summary_sync,
     build_release,
     build_reserve,
@@ -69,12 +72,13 @@ from aggregator_proxy.nsi_soap import (
     build_terminate,
     parse,
     parse_query_notification_sync,
+    parse_query_result_sync,
     parse_query_summary_sync,
 )
 from aggregator_proxy.reservation_store import Reservation, ReservationStore
 from aggregator_proxy.routers.nsi_callback import NSI_CALLBACK_PATH
 from aggregator_proxy.settings import settings
-from aggregator_proxy.state_mapping import map_nsi_states_to_status
+from aggregator_proxy.state_mapping import DerivedStatus, derive_status, map_nsi_states_to_status
 
 logger = structlog.get_logger(__name__)
 
@@ -106,6 +110,8 @@ def _raise_for_status(response: httpx.Response, operation: str, **extra: object)
 
 
 _DEFAULT_SERVICE_TYPE = "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE"
+
+_TERMINAL_STATUSES = (ReservationStatus.TERMINATED, ReservationStatus.FAILED)
 
 router = APIRouter(prefix="/reservations", tags=["reservations"])
 
@@ -190,12 +196,54 @@ def _format_last_error(error_events: list[ErrorEvent]) -> str | None:
     return latest.event
 
 
+def _resolve_last_error(
+    derived: DerivedStatus, nsi_last_error: str | None, existing_last_error: str | None
+) -> str | None:
+    """Decide the last_error to store, tied to the derived status.
+
+    An NSI errorEvent always wins. Otherwise a FAILED status carries the deriver's synthetic reason
+    (or keeps the prior message if there is none), and any non-FAILED status clears it.
+    """
+    if nsi_last_error is not None:
+        return nsi_last_error
+    if derived.status == ReservationStatus.FAILED:
+        return derived.reason if derived.reason is not None else existing_last_error
+    return None
+
+
+def _record_seen_error_events(
+    reservation: Reservation, connection_id: str, error_events: list[ErrorEvent] | None
+) -> None:
+    """Log newly-seen error events and remember their notification ids."""
+    if not error_events:
+        return
+    seen_ids = reservation.seen_error_notification_ids
+    new_events = [e for e in error_events if seen_ids is None or e.notification_id not in seen_ids]
+    if new_events:
+        logger.info(
+            "New error events detected for reservation",
+            connection_id=connection_id,
+            error_event_count=len(new_events),
+            events=[e.event for e in new_events],
+        )
+    else:
+        logger.debug(
+            "Error events detected for reservation (already seen)",
+            connection_id=connection_id,
+            error_event_count=len(error_events),
+        )
+    if reservation.seen_error_notification_ids is None:
+        reservation.seen_error_notification_ids = set()
+    reservation.seen_error_notification_ids.update(e.notification_id for e in error_events)
+
+
 def _update_store_from_query(
-    store: ReservationStore, qr: QueryReservation, error_events: list[ErrorEvent] | None = None
+    store: ReservationStore,
+    qr: QueryReservation,
+    derived: DerivedStatus,
+    error_events: list[ErrorEvent] | None = None,
 ) -> Reservation:
-    """Create or update a Reservation in the store from a QueryReservation."""
-    has_errors = bool(error_events)
-    mapped_status = map_nsi_states_to_status(qr.connection_states, has_error_event=has_errors)
+    """Create or update a Reservation in the store from a derived status."""
     existing = store.get(qr.connection_id)
 
     criteria: CriteriaResponse | None = None
@@ -206,19 +254,19 @@ def _update_store_from_query(
             p2ps=P2PS(capacity=qr.capacity, sourceSTP=qr.source_stp, destSTP=qr.dest_stp),
         )
 
-    last_error = _format_last_error(error_events or [])
+    nsi_last_error = _format_last_error(error_events or [])
+    last_error = _resolve_last_error(derived, nsi_last_error, existing.last_error if existing is not None else None)
 
     if existing is not None:
-        existing.status = mapped_status
-        if last_error is not None:
-            existing.last_error = last_error
+        existing.status = derived.status
+        existing.last_error = last_error
         if criteria is not None:
             existing.criteria = criteria
         reservation = existing
     else:
         reservation = Reservation(
             connection_id=qr.connection_id,
-            status=mapped_status,
+            status=derived.status,
             global_reservation_id=qr.global_reservation_id,
             description=qr.description,
             criteria=criteria,
@@ -227,26 +275,7 @@ def _update_store_from_query(
         )
         store.create(reservation)
 
-    if error_events:
-        seen_ids = reservation.seen_error_notification_ids
-        new_events = [e for e in error_events if seen_ids is None or e.notification_id not in seen_ids]
-        if new_events:
-            logger.info(
-                "New error events detected for reservation",
-                connection_id=qr.connection_id,
-                error_event_count=len(new_events),
-                events=[e.event for e in new_events],
-            )
-        else:
-            logger.debug(
-                "Error events detected for reservation (already seen)",
-                connection_id=qr.connection_id,
-                error_event_count=len(error_events),
-            )
-        if reservation.seen_error_notification_ids is None:
-            reservation.seen_error_notification_ids = set()
-        reservation.seen_error_notification_ids.update(e.notification_id for e in error_events)
-
+    _record_seen_error_events(reservation, qr.connection_id, error_events)
     return reservation
 
 
@@ -269,11 +298,12 @@ def _map_children_to_segments(children: list[ChildSegment] | None) -> list[PathS
     ]
 
 
-async def _query_error_events(
+async def _query_notifications(
     nsi_client: httpx.AsyncClient,
     connection_id: str,
-) -> list[ErrorEvent]:
-    """Query the aggregator for error event notifications for a connection."""
+) -> Notifications:
+    """Query the aggregator for a connection's notification history (error events + data-plane changes)."""
+    empty = Notifications(error_events=[], data_plane_changes=[])
     header = _query_header()
     soap_bytes = build_query_notification_sync(header, connection_id)
     logger.debug("Outbound SOAP queryNotificationSync request", xml=soap_bytes.decode(), connection_id=connection_id)
@@ -288,18 +318,70 @@ async def _query_error_events(
             connection_id=connection_id,
             error=str(exc),
         )
-        return []
+        return empty
     logger.debug("Inbound SOAP queryNotificationSyncConfirmed response", xml=response.text, connection_id=connection_id)
     try:
-        events = parse_query_notification_sync(response.content)
+        return parse_query_notification_sync(response.content)
     except Exception as exc:
         logger.error(
             "Failed to parse queryNotificationSync response",
             connection_id=connection_id,
             error=str(exc),
         )
+        return empty
+
+
+async def _query_results(
+    nsi_client: httpx.AsyncClient,
+    connection_id: str,
+) -> list[OperationResult]:
+    """Query the aggregator for a connection's operation-result history via queryResultSync."""
+    header = _query_header()
+    soap_bytes = build_query_result_sync(header, connection_id=connection_id)
+    logger.debug("Outbound SOAP queryResultSync request", xml=soap_bytes.decode(), connection_id=connection_id)
+    try:
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("queryResultSync")
+        )
+        _raise_for_status(response, "queryResultSync", connection_id=connection_id)
+    except Exception as exc:
+        logger.error("Failed to query results from aggregator", connection_id=connection_id, error=str(exc))
         return []
-    return events
+    logger.debug("Inbound SOAP queryResultSyncConfirmed response", xml=response.text, connection_id=connection_id)
+    try:
+        return parse_query_result_sync(response.content)
+    except Exception as exc:
+        logger.error("Failed to parse queryResultSync response", connection_id=connection_id, error=str(exc))
+        return []
+
+
+async def _resolve_and_store(
+    qr: QueryReservation,
+    notifications: Notifications,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> Reservation:
+    """Derive the connection's status from the aggregator and write it to the store.
+
+    The base status comes from the live connection states; only the ambiguous transient states
+    (ACTIVATING/DEACTIVATING) need the durable operation-result history to decide stuck-vs-in-progress,
+    so queryResultSync is issued only for those.
+    """
+    base = map_nsi_states_to_status(qr.connection_states, has_error_event=bool(notifications.error_events))
+    results = (
+        await _query_results(nsi_client, qr.connection_id)
+        if base in (ReservationStatus.ACTIVATING, ReservationStatus.DEACTIVATING)
+        else []
+    )
+    derived = derive_status(
+        base,
+        results=results,
+        data_plane_changes=notifications.data_plane_changes,
+        start_time=qr.start_time,
+        now=datetime.now(timezone.utc),
+        dataplane_timeout=timedelta(seconds=settings.dataplane_timeout),
+    )
+    return _update_store_from_query(store, qr, derived, notifications.error_events)
 
 
 async def _query_summary_sync(
@@ -328,15 +410,15 @@ async def _refresh_reservation(
     store: ReservationStore,
 ) -> tuple[Reservation | None, QueryReservation | None]:
     """Query the aggregator for a single reservation and update the store."""
-    query_reservations, error_events = await asyncio.gather(
+    query_reservations, notifications = await asyncio.gather(
         _query_summary_sync(nsi_client, connection_id),
-        _query_error_events(nsi_client, connection_id),
+        _query_notifications(nsi_client, connection_id),
     )
     if not query_reservations:
         logger.info("Reservation not found on aggregator", connection_id=connection_id)
         return None, None
     qr = query_reservations[0]
-    reservation = _update_store_from_query(store, qr, error_events)
+    reservation = await _resolve_and_store(qr, notifications, nsi_client, store)
     logger.info(
         "Reservation state refreshed from aggregator", connection_id=qr.connection_id, status=reservation.status
     )
@@ -348,9 +430,9 @@ async def _finalize_refresh(
     nsi_client: httpx.AsyncClient,
     store: ReservationStore,
 ) -> tuple[Reservation, QueryReservation]:
-    """Query error events, update the store, and return the refreshed reservation."""
-    error_events = await _query_error_events(nsi_client, qr.connection_id)
-    reservation = _update_store_from_query(store, qr, error_events)
+    """Query notifications, derive the status, update the store, and return the refreshed reservation."""
+    notifications = await _query_notifications(nsi_client, qr.connection_id)
+    reservation = await _resolve_and_store(qr, notifications, nsi_client, store)
     logger.info(
         "Reservation state refreshed from aggregator", connection_id=qr.connection_id, status=reservation.status
     )
@@ -428,26 +510,29 @@ async def _refresh_all_reservations(
     query_reservations = parse_query_summary_sync(response.content)
     logger.info("Aggregator returned reservations", count=len(query_reservations))
 
-    # For reservations not already in a terminal/failed state, query error events concurrently
-    needs_notification: list[QueryReservation] = []
-    terminal_reservations: list[QueryReservation] = []
-    for qr in query_reservations:
-        preliminary_status = map_nsi_states_to_status(qr.connection_states)
-        if preliminary_status in (ReservationStatus.TERMINATED, ReservationStatus.FAILED):
-            terminal_reservations.append(qr)
-        else:
-            needs_notification.append(qr)
+    # Terminal reservations are durably reported by the aggregator, so they take their status directly;
+    # only the transient ones need the notification/result history to resolve stuck-vs-in-progress.
+    terminal_reservations = [
+        qr for qr in query_reservations if map_nsi_states_to_status(qr.connection_states) in _TERMINAL_STATUSES
+    ]
+    needs_resolution = [
+        qr for qr in query_reservations if map_nsi_states_to_status(qr.connection_states) not in _TERMINAL_STATUSES
+    ]
 
     for qr in terminal_reservations:
-        _update_store_from_query(store, qr)
+        _update_store_from_query(store, qr, DerivedStatus(map_nsi_states_to_status(qr.connection_states)))
 
-    if needs_notification:
-        logger.debug("Checking error events for active reservations", count=len(needs_notification))
-        error_results = await asyncio.gather(
-            *(_query_error_events(nsi_client, qr.connection_id) for qr in needs_notification)
+    if needs_resolution:
+        logger.debug("Resolving active reservations against the aggregator", count=len(needs_resolution))
+        notification_results = await asyncio.gather(
+            *(_query_notifications(nsi_client, qr.connection_id) for qr in needs_resolution)
         )
-        for qr, error_events in zip(needs_notification, error_results, strict=True):
-            _update_store_from_query(store, qr, error_events)
+        await asyncio.gather(
+            *(
+                _resolve_and_store(qr, notifications, nsi_client, store)
+                for qr, notifications in zip(needs_resolution, notification_results, strict=True)
+            )
+        )
 
     return query_reservations
 
@@ -539,6 +624,7 @@ async def _complete_reserve(
         store.update_status(connection_id, ReservationStatus.RESERVED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = None
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Reservation committed, state is RESERVED")
 
@@ -732,6 +818,7 @@ async def _complete_provision(
         store.update_status(connection_id, ReservationStatus.ACTIVATED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = None
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Data plane active, state is ACTIVATED")
 
@@ -859,6 +946,7 @@ async def _complete_release(
         store.update_status(connection_id, ReservationStatus.RESERVED)
         reservation = store.get(connection_id)
         if reservation is not None:
+            reservation.last_error = None
             await _send_callback(callback_client, reservation.callback_url, reservation)
         log.info("Data plane deactivated, state is RESERVED")
 

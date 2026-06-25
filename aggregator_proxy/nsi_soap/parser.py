@@ -230,6 +230,21 @@ def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
     )
 
 
+def _parse_data_plane_state_change(element: etree._Element) -> DataPlaneStateChange:
+    """Parse a <dataPlaneStateChange> element (callback or queryNotificationSync history)."""
+    dps = element.find("dataPlaneStatus")
+    if dps is None:
+        raise ValueError("<dataPlaneStatus> not found in dataPlaneStateChange")
+    return DataPlaneStateChange(
+        connection_id=_require(element, "connectionId"),
+        notification_id=int(_require(element, "notificationId")),
+        timestamp=_require(element, "timeStamp"),
+        active=_require(dps, "active") == "true",
+        version=int(_require(dps, "version")),
+        version_consistent=_require(dps, "versionConsistent") == "true",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -306,17 +321,7 @@ def parse(xml: XmlInput) -> NsiMessage:
             )
 
         case "dataPlaneStateChange":
-            dps = operation.find("dataPlaneStatus")
-            if dps is None:
-                raise ValueError("<dataPlaneStatus> not found in dataPlaneStateChange")
-            return DataPlaneStateChange(
-                connection_id=_require(operation, "connectionId"),
-                notification_id=int(_require(operation, "notificationId")),
-                timestamp=_require(operation, "timeStamp"),
-                active=_require(dps, "active") == "true",
-                version=int(_require(dps, "version")),
-                version_consistent=_require(dps, "versionConsistent") == "true",
-            )
+            return _parse_data_plane_state_change(operation)
 
         case "releaseConfirmed":
             return ReleaseConfirmed(
@@ -381,6 +386,7 @@ class QueryReservation:
     capacity: int | None = None
     source_stp: str | None = None
     dest_stp: str | None = None
+    start_time: str | None = None
     children: list[ChildSegment] | None = None
 
 
@@ -441,6 +447,7 @@ def _parse_reservation_element(reservation_el: etree._Element) -> QueryReservati
     capacity: int | None = None
     source_stp: str | None = None
     dest_stp: str | None = None
+    start_time: str | None = None
     children: list[ChildSegment] | None = None
 
     criteria_el = reservation_el.find("criteria")
@@ -454,6 +461,10 @@ def _parse_reservation_element(reservation_el: etree._Element) -> QueryReservati
                 capacity = int(cap_text)
             source_stp = p2ps_el.findtext("sourceSTP")
             dest_stp = p2ps_el.findtext("destSTP")
+
+        schedule_el = criteria_el.find("schedule")
+        if schedule_el is not None:
+            start_time = schedule_el.findtext("startTime")
 
         children_el = criteria_el.find("children")
         if children_el is not None:
@@ -471,6 +482,7 @@ def _parse_reservation_element(reservation_el: etree._Element) -> QueryReservati
         capacity=capacity,
         source_stp=source_stp,
         dest_stp=dest_stp,
+        start_time=start_time,
         children=children,
     )
 
@@ -508,8 +520,34 @@ class ErrorEvent:
     service_exception: ServiceException | None
 
 
-def parse_query_notification_sync(xml_bytes: bytes) -> list[ErrorEvent]:
-    """Parse a queryNotificationSyncConfirmed SOAP envelope into a list of error events."""
+@dataclass
+class Notifications:
+    """The notification history of a connection from queryNotificationSync."""
+
+    error_events: list[ErrorEvent]
+    data_plane_changes: list[DataPlaneStateChange]
+
+
+def _parse_error_event(error_el: etree._Element) -> ErrorEvent:
+    """Parse a single <errorEvent> element."""
+    exc_el = error_el.find("serviceException")
+    return ErrorEvent(
+        connection_id=_require(error_el, "connectionId"),
+        notification_id=int(_require(error_el, "notificationId")),
+        timestamp=_require(error_el, "timeStamp"),
+        event=_require(error_el, "event"),
+        originating_connection_id=_require(error_el, "originatingConnectionId"),
+        originating_nsa=_require(error_el, "originatingNSA"),
+        service_exception=_parse_service_exception(exc_el) if exc_el is not None else None,
+    )
+
+
+def parse_query_notification_sync(xml_bytes: bytes) -> Notifications:
+    """Parse a queryNotificationSyncConfirmed SOAP envelope into its notification history.
+
+    Returns both the errorEvent notifications and the dataPlaneStateChange history; the latter is what
+    lets a caller tell "the data plane never came up" from "it came up and later went down".
+    """
     root = etree.fromstring(xml_bytes)
     body = root.find(f"{{{NSMAP['soapenv']}}}Body")
     if body is None or not len(body):
@@ -520,31 +558,62 @@ def parse_query_notification_sync(xml_bytes: bytes) -> list[ErrorEvent]:
     if local != "queryNotificationSyncConfirmed":
         raise ValueError(f"Expected queryNotificationSyncConfirmed, got {local!r}")
 
-    results: list[ErrorEvent] = []
-    for error_el in confirmed.findall(f"{{{_C}}}errorEvent"):
-        connection_id = _require(error_el, "connectionId")
-        notification_id = int(_require(error_el, "notificationId"))
-        timestamp = _require(error_el, "timeStamp")
-        event = _require(error_el, "event")
-        originating_connection_id = _require(error_el, "originatingConnectionId")
-        originating_nsa = _require(error_el, "originatingNSA")
+    return Notifications(
+        error_events=[_parse_error_event(el) for el in confirmed.findall(f"{{{_C}}}errorEvent")],
+        data_plane_changes=[
+            _parse_data_plane_state_change(el) for el in confirmed.findall(f"{{{_C}}}dataPlaneStateChange")
+        ],
+    )
 
-        exc_el = error_el.find("serviceException")
-        service_exception = _parse_service_exception(exc_el) if exc_el is not None else None
 
-        results.append(
-            ErrorEvent(
-                connection_id=connection_id,
-                notification_id=notification_id,
-                timestamp=timestamp,
-                event=event,
-                originating_connection_id=originating_connection_id,
-                originating_nsa=originating_nsa,
-                service_exception=service_exception,
-            )
-        )
+# ---------------------------------------------------------------------------
+# Query result sync
+# ---------------------------------------------------------------------------
 
-    return results
+
+@dataclass
+class OperationResult:
+    """A single <result> from queryResultSync: an operation outcome with its timestamp.
+
+    ``operation`` is the local name of the nested confirm/fail element (e.g. ``provisionConfirmed``,
+    ``releaseConfirmed``); ``result_id`` is the aggregator's monotonic per-connection result counter.
+    """
+
+    result_id: int
+    timestamp: str
+    operation: str
+    connection_id: str
+
+
+def _parse_result_element(result_el: etree._Element) -> OperationResult:
+    """Parse a single <result> element from a queryResultSyncConfirmed."""
+    operation_el = next(
+        (child for child in result_el if isinstance(child.tag, str) and etree.QName(child).namespace == _C),
+        None,
+    )
+    if operation_el is None:
+        raise ValueError("No NSI operation element found in <result>")
+    return OperationResult(
+        result_id=int(_require(result_el, "resultId")),
+        timestamp=_require(result_el, "timeStamp"),
+        operation=etree.QName(operation_el).localname,
+        connection_id=operation_el.findtext("connectionId") or "",
+    )
+
+
+def parse_query_result_sync(xml_bytes: bytes) -> list[OperationResult]:
+    """Parse a queryResultSyncConfirmed SOAP envelope into a list of operation results."""
+    root = etree.fromstring(xml_bytes)
+    body = root.find(f"{{{NSMAP['soapenv']}}}Body")
+    if body is None or not len(body):
+        raise ValueError("No SOAP Body found or Body is empty")
+
+    confirmed = body[0]
+    local = etree.QName(confirmed.tag).localname
+    if local != "queryResultSyncConfirmed":
+        raise ValueError(f"Expected queryResultSyncConfirmed, got {local!r}")
+
+    return [_parse_result_element(result_el) for result_el in confirmed.findall("result")]
 
 
 def parse_correlation_id(xml: XmlInput) -> str:

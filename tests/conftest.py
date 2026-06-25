@@ -137,6 +137,63 @@ def build_error_event_xml(
     )
 
 
+def build_data_plane_state_change_xml(
+    connection_id: str = "conn-001",
+    notification_id: int = 1,
+    timestamp: str = "2025-06-01T12:00:00Z",
+    active: bool = True,
+) -> str:
+    """Build a dataPlaneStateChange XML fragment for use in queryNotificationSyncConfirmed."""
+    return (
+        f'<nsi_ctypes:dataPlaneStateChange xmlns:nsi_ctypes="{_C}">'
+        f"<connectionId>{connection_id}</connectionId>"
+        f"<notificationId>{notification_id}</notificationId>"
+        f"<timeStamp>{timestamp}</timeStamp>"
+        "<dataPlaneStatus>"
+        f"<active>{'true' if active else 'false'}</active>"
+        "<version>1</version>"
+        "<versionConsistent>true</versionConsistent>"
+        "</dataPlaneStatus>"
+        "</nsi_ctypes:dataPlaneStateChange>"
+    )
+
+
+def build_result_xml(
+    result_id: int,
+    timestamp: str,
+    operation: str,
+    connection_id: str = "conn-001",
+) -> str:
+    """Build a <result> XML fragment for use in queryResultSyncConfirmed."""
+    return (
+        "<result>"
+        f"<resultId>{result_id}</resultId>"
+        f"<correlationId>urn:uuid:corr-{result_id}</correlationId>"
+        f"<timeStamp>{timestamp}</timeStamp>"
+        f'<nsi_ctypes:{operation} xmlns:nsi_ctypes="{_C}">'
+        f"<connectionId>{connection_id}</connectionId>"
+        f"</nsi_ctypes:{operation}>"
+        "</result>"
+    )
+
+
+def build_query_result_sync_response(correlation_id: str, *results: str) -> bytes:
+    """Build a queryResultSyncConfirmed SOAP response with optional result elements."""
+    results_xml = "".join(results)
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:nsi_ctypes="{_C}">
+  <soapenv:Header>
+    <head:nsiHeader>
+      <correlationId>{correlation_id}</correlationId>
+    </head:nsiHeader>
+  </soapenv:Header>
+  <soapenv:Body>
+    <nsi_ctypes:queryResultSyncConfirmed>{results_xml}</nsi_ctypes:queryResultSyncConfirmed>
+  </soapenv:Body>
+</soapenv:Envelope>""".encode()
+
+
 def build_child_xml(
     order: int = 0,
     connection_id: str = "child-conn-001",

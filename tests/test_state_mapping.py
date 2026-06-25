@@ -15,11 +15,13 @@
 
 """Tests for NSI state to proxy status mapping."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from aggregator_proxy.models import ReservationStatus
-from aggregator_proxy.nsi_soap.parser import ConnectionStates
-from aggregator_proxy.state_mapping import map_nsi_states_to_status
+from aggregator_proxy.nsi_soap.parser import ConnectionStates, DataPlaneStateChange, OperationResult
+from aggregator_proxy.state_mapping import derive_status, map_nsi_states_to_status
 
 
 @pytest.mark.parametrize(
@@ -148,3 +150,151 @@ def test_map_nsi_states_to_status(states: ConnectionStates, expected: Reservatio
 )
 def test_error_event_flag(states: ConnectionStates, has_error_event: bool, expected: ReservationStatus) -> None:
     assert map_nsi_states_to_status(states, has_error_event=has_error_event) == expected
+
+
+# ---------------------------------------------------------------------------
+# Time-aware derive_status
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+_TIMEOUT = timedelta(seconds=300)
+
+
+def _iso(offset_seconds: int) -> str:
+    return (_NOW + timedelta(seconds=offset_seconds)).isoformat()
+
+
+def _result(operation: str, offset_seconds: int, result_id: int = 1) -> OperationResult:
+    return OperationResult(result_id=result_id, timestamp=_iso(offset_seconds), operation=operation, connection_id="c")
+
+
+def _dp(active: bool, offset_seconds: int) -> DataPlaneStateChange:
+    return DataPlaneStateChange(
+        connection_id="c",
+        notification_id=1,
+        timestamp=_iso(offset_seconds),
+        active=active,
+        version=1,
+        version_consistent=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("base", "results", "data_plane_changes", "start_time", "expected_status", "expect_reason"),
+    [
+        pytest.param(ReservationStatus.RESERVED, [], [], None, ReservationStatus.RESERVED, False, id="stable-reserved"),
+        pytest.param(
+            ReservationStatus.ACTIVATED, [], [], None, ReservationStatus.ACTIVATED, False, id="stable-activated"
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [_result("provisionConfirmed", -10)],
+            [],
+            None,
+            ReservationStatus.ACTIVATING,
+            False,
+            id="activating-within-grace",
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [_result("provisionConfirmed", -600)],
+            [],
+            None,
+            ReservationStatus.FAILED,
+            True,
+            id="activating-never-active-past-timeout",
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [_result("provisionConfirmed", -600)],
+            [_dp(True, -590)],
+            None,
+            ReservationStatus.FAILED,
+            True,
+            id="activating-came-up-then-dropped-unsolicited",
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING, [], [], None, ReservationStatus.ACTIVATING, False, id="activating-no-anchor"
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [
+                OperationResult(
+                    result_id=1, timestamp="not-a-timestamp", operation="provisionConfirmed", connection_id="c"
+                )
+            ],
+            [],
+            None,
+            ReservationStatus.ACTIVATING,
+            False,
+            id="activating-unparseable-anchor",
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [_result("provisionConfirmed", -600)],
+            [],
+            _iso(0),
+            ReservationStatus.ACTIVATING,
+            False,
+            id="activating-starttime-in-future-clamps",
+        ),
+        pytest.param(
+            ReservationStatus.ACTIVATING,
+            [
+                _result("provisionConfirmed", -600, result_id=1),
+                _result("releaseConfirmed", -400, result_id=2),
+                _result("provisionConfirmed", -10, result_id=3),
+            ],
+            [_dp(True, -590)],
+            None,
+            ReservationStatus.ACTIVATING,
+            False,
+            id="activating-reprovision-uses-latest-epoch",
+        ),
+        pytest.param(
+            ReservationStatus.DEACTIVATING,
+            [_result("releaseConfirmed", -10)],
+            [],
+            None,
+            ReservationStatus.DEACTIVATING,
+            False,
+            id="deactivating-within-grace",
+        ),
+        pytest.param(
+            ReservationStatus.DEACTIVATING,
+            [_result("releaseConfirmed", -600)],
+            [],
+            None,
+            ReservationStatus.FAILED,
+            True,
+            id="deactivating-past-timeout",
+        ),
+        pytest.param(
+            ReservationStatus.DEACTIVATING,
+            [],
+            [],
+            None,
+            ReservationStatus.DEACTIVATING,
+            False,
+            id="deactivating-no-anchor",
+        ),
+    ],
+)
+def test_derive_status(
+    base: ReservationStatus,
+    results: list[OperationResult],
+    data_plane_changes: list[DataPlaneStateChange],
+    start_time: str | None,
+    expected_status: ReservationStatus,
+    expect_reason: bool,
+) -> None:
+    derived = derive_status(
+        base,
+        results=results,
+        data_plane_changes=data_plane_changes,
+        start_time=start_time,
+        now=_NOW,
+        dataplane_timeout=_TIMEOUT,
+    )
+    assert derived.status == expected_status
+    assert (derived.reason is not None) == expect_reason

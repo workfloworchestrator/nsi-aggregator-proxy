@@ -85,13 +85,14 @@ class TestParseQueryNotificationSync:
     def test_empty_result(self) -> None:
         xml = _build_xml("")
         result = parse_query_notification_sync(xml)
-        assert result == []
+        assert result.error_events == []
+        assert result.data_plane_changes == []
 
     def test_single_error_event(self) -> None:
         xml = _build_xml(_ERROR_EVENT)
         result = parse_query_notification_sync(xml)
-        assert len(result) == 1
-        e = result[0]
+        assert len(result.error_events) == 1
+        e = result.error_events[0]
         assert e.connection_id == "conn-001"
         assert e.notification_id == 5
         assert e.timestamp == "2025-06-01T12:00:00Z"
@@ -105,23 +106,29 @@ class TestParseQueryNotificationSync:
     def test_error_event_without_service_exception(self) -> None:
         xml = _build_xml(_ERROR_EVENT_NO_EXCEPTION)
         result = parse_query_notification_sync(xml)
-        assert len(result) == 1
-        assert result[0].event == "forcedEnd"
-        assert result[0].service_exception is None
+        assert len(result.error_events) == 1
+        assert result.error_events[0].event == "forcedEnd"
+        assert result.error_events[0].service_exception is None
 
     def test_multiple_error_events(self) -> None:
         xml = _build_xml(_ERROR_EVENT + _ERROR_EVENT_NO_EXCEPTION)
         result = parse_query_notification_sync(xml)
-        assert len(result) == 2
-        assert result[0].notification_id == 5
-        assert result[1].notification_id == 3
+        assert len(result.error_events) == 2
+        assert result.error_events[0].notification_id == 5
+        assert result.error_events[1].notification_id == 3
 
-    def test_only_error_events_returned(self) -> None:
-        """Non-errorEvent notifications (e.g. dataPlaneStateChange) are ignored."""
+    def test_error_events_and_data_plane_changes_returned(self) -> None:
+        """Both errorEvent and dataPlaneStateChange notifications are captured."""
         xml = _build_xml(_ERROR_EVENT + _DATA_PLANE_STATE_CHANGE)
         result = parse_query_notification_sync(xml)
-        assert len(result) == 1
-        assert result[0].event == "deactivateFailed"
+        assert len(result.error_events) == 1
+        assert result.error_events[0].event == "deactivateFailed"
+        assert len(result.data_plane_changes) == 1
+        change = result.data_plane_changes[0]
+        assert change.connection_id == "conn-001"
+        assert change.notification_id == 4
+        assert change.timestamp == "2025-06-01T11:30:00Z"
+        assert change.active is True
 
     def test_wrong_operation_raises(self) -> None:
         xml = (

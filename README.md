@@ -83,6 +83,26 @@ stateDiagram-v2
 | `FAILED` | An error occurred; the connection can be terminated from this state |
 | `TERMINATED` | Connection has been terminated; terminal state |
 
+### Status is derived from the aggregator on every read
+
+The aggregator is the source of truth: each `GET /reservations[/{id}]` re-derives the status from a
+live query rather than trusting only the in-memory store, so it is correct even after a proxy restart
+(when the store is empty and rebuilt from the aggregator). The stable states
+(`RESERVED`/`ACTIVATED`/`FAILED`/`TERMINATED`) are taken directly. The transient states
+(`ACTIVATING`/`DEACTIVATING`) are an SLA the aggregator doesn't itself express, so they are resolved
+from the aggregator's durable history (`queryResultSync` for the provision/release timestamp,
+`queryNotificationSync` for the `dataPlaneStateChange` history):
+
+- **provision whose data plane never comes up** within `DATAPLANE_TIMEOUT` of the last
+  `provisionConfirmed` (clamped to the reservation start time) → `FAILED`;
+- **data plane that came up and then went inactive on its own** (still provisioned, no release or
+  terminate) → `FAILED` — an unsolicited data-plane down does not recover;
+- the release side is symmetric.
+
+This guarantees a reservation always converges to a stable state — so a connection stuck mid-activation
+(e.g. a missed callback) is reported as `FAILED` rather than a perpetual `ACTIVATING`, letting the
+orchestrator reconcile and terminate it.
+
 ## Getting Started
 
 ### Prerequisites

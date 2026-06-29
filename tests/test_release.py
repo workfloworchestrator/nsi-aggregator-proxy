@@ -87,6 +87,7 @@ def client(_app_state: None) -> TestClient:
 def _make_nsi_handler(
     provision_state: str = "Provisioned",
     data_plane_active: bool = True,
+    lifecycle_state: str = "Created",
 ) -> Callable[[httpx.Request], httpx.Response]:
     """Create a mock NSI handler that returns the given states for querySummarySync."""
 
@@ -104,6 +105,7 @@ def _make_nsi_handler(
                         correlation_id=cid,
                         provision_state=provision_state,
                         data_plane_active=data_plane_active,
+                        lifecycle_state=lifecycle_state,
                     ),
                 )
             return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
@@ -130,12 +132,14 @@ class TestReleaseValidation:
         )
         assert resp.status_code == 404
 
-    def test_release_non_activated_state_returns_409(self, store: ReservationStore) -> None:
-        store.create(_make_reservation(status=ReservationStatus.RESERVED))
-        # Mock returns Released+inactive → RESERVED, so release is rejected
+    def test_release_invalid_state_returns_409(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.TERMINATED))
+        # Mock returns a Terminated lifecycle → TERMINATED, which is neither ACTIVATED (releasable)
+        # nor an in-flight/done release state, so it is rejected.
         app.state.nsi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_make_nsi_handler(provision_state="Released", data_plane_active=False))
+            transport=httpx.MockTransport(_make_nsi_handler(lifecycle_state="Terminated"))
         )
+        app.state.callback_client = httpx.AsyncClient()
         app.state.reservation_store = store
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -143,6 +147,51 @@ class TestReleaseValidation:
             json={"callbackURL": CALLBACK_URL},
         )
         assert resp.status_code == 409
+
+
+class TestReleaseIdempotency:
+    """A retried release must not re-dispatch when the connection is already deactivating/released."""
+
+    @pytest.mark.anyio()
+    async def test_release_already_deactivating_is_idempotent(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.DEACTIVATING))
+        # Released + active → DEACTIVATING (release still in flight): adopt the new callbackURL and
+        # return 202 without sending a second release (no new pending future is registered).
+        handler = _make_nsi_handler(provision_state="Released", data_plane_active=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            app.state.nsi_client = nsi_client
+            app.state.callback_client = httpx.AsyncClient()
+            app.state.reservation_store = store
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(f"/reservations/{CONNECTION_ID}/release", json={"callbackURL": CALLBACK_URL})
+        assert resp.status_code == 202
+        assert store.get(CONNECTION_ID).callback_url == CALLBACK_URL  # type: ignore[union-attr]
+        assert len(store._pending) == 0  # noqa: SLF001 — no second release was dispatched
+
+    @pytest.mark.anyio()
+    async def test_release_already_released_redelivers_callback(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.RESERVED))
+        new_callback = "http://callback.example.com/retry"
+        delivered: list[str] = []
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            delivered.append(str(request.url))
+            return httpx.Response(200)
+
+        # Released + inactive → RESERVED (release's success state): re-deliver the result to the new url.
+        handler = _make_nsi_handler(provision_state="Released", data_plane_active=False)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/reservations/{CONNECTION_ID}/release", json={"callbackURL": new_callback}
+                    )
+        assert resp.status_code == 202
+        assert delivered == [new_callback]
+        assert len(store._pending) == 0  # noqa: SLF001 — no release was dispatched
 
 
 class TestReleaseAggregatorFailure:

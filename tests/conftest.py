@@ -47,9 +47,11 @@ def build_query_summary_sync_response(
     capacity: int = 1000,
     source_stp: str = "urn:ogf:network:example.net:2025:src?vlan=100",
     dest_stp: str = "urn:ogf:network:example.net:2025:dst?vlan=200",
+    global_reservation_id: str | None = None,
 ) -> bytes:
     """Build a querySummarySyncConfirmed SOAP response for a single reservation."""
     active_str = "true" if data_plane_active else "false"
+    grid_xml = f"<globalReservationId>{global_reservation_id}</globalReservationId>" if global_reservation_id else ""
     return f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="{_S}" xmlns:head="{_H}" xmlns:nsi_ctypes="{_C}" xmlns:nsi_p2p="{_P}">
@@ -61,6 +63,7 @@ def build_query_summary_sync_response(
   <soapenv:Body>
     <nsi_ctypes:querySummarySyncConfirmed>
       <reservation>
+        {grid_xml}
         <connectionId>{connection_id}</connectionId>
         <description>test reservation</description>
         <criteria version="1">

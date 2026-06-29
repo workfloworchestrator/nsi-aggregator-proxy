@@ -74,6 +74,7 @@ def _make_reservation(status: ReservationStatus = ReservationStatus.RESERVED) ->
 def _make_nsi_handler(
     provision_state: str = "Released",
     data_plane_active: bool = False,
+    lifecycle_state: str = "Created",
 ) -> Callable[[httpx.Request], httpx.Response]:
     """Create a mock NSI handler that returns the given states for querySummarySync."""
 
@@ -91,6 +92,7 @@ def _make_nsi_handler(
                         correlation_id=cid,
                         provision_state=provision_state,
                         data_plane_active=data_plane_active,
+                        lifecycle_state=lifecycle_state,
                     ),
                 )
             return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
@@ -122,12 +124,14 @@ class TestProvisionValidation:
         )
         assert resp.status_code == 404
 
-    def test_provision_non_reserved_state_returns_409(self, store: ReservationStore) -> None:
-        store.create(_make_reservation(status=ReservationStatus.ACTIVATING))
-        # Mock returns Provisioned+inactive → ACTIVATING, so provision is rejected
+    def test_provision_invalid_state_returns_409(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.TERMINATED))
+        # Mock returns a Terminated lifecycle → TERMINATED, which is neither RESERVED (provisionable)
+        # nor an in-flight/done provision state, so it is rejected.
         app.state.nsi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_make_nsi_handler(provision_state="Provisioned"))
+            transport=httpx.MockTransport(_make_nsi_handler(lifecycle_state="Terminated"))
         )
+        app.state.callback_client = httpx.AsyncClient()
         app.state.reservation_store = store
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -135,6 +139,51 @@ class TestProvisionValidation:
             json={"callbackURL": CALLBACK_URL},
         )
         assert resp.status_code == 409
+
+
+class TestProvisionIdempotency:
+    """A retried provision must not re-dispatch when the connection is already activating/activated."""
+
+    @pytest.mark.anyio()
+    async def test_provision_already_activating_is_idempotent(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.ACTIVATING))
+        # Provisioned + inactive → ACTIVATING (provision still in flight): adopt the new callbackURL
+        # and return 202 without sending a second provision (no new pending future is registered).
+        handler = _make_nsi_handler(provision_state="Provisioned")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            app.state.nsi_client = nsi_client
+            app.state.callback_client = httpx.AsyncClient()
+            app.state.reservation_store = store
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                resp = await client.post(f"/reservations/{CONNECTION_ID}/provision", json={"callbackURL": CALLBACK_URL})
+        assert resp.status_code == 202
+        assert store.get(CONNECTION_ID).callback_url == CALLBACK_URL  # type: ignore[union-attr]
+        assert len(store._pending) == 0  # noqa: SLF001 — no second provision was dispatched
+
+    @pytest.mark.anyio()
+    async def test_provision_already_activated_redelivers_callback(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.ACTIVATED))
+        new_callback = "http://callback.example.com/retry"
+        delivered: list[str] = []
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            delivered.append(str(request.url))
+            return httpx.Response(200)
+
+        # data_plane_active → ACTIVATED (already provisioned): re-deliver the result to the new url.
+        handler = _make_nsi_handler(provision_state="Provisioned", data_plane_active=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/reservations/{CONNECTION_ID}/provision", json={"callbackURL": new_callback}
+                    )
+        assert resp.status_code == 202
+        assert delivered == [new_callback]
+        assert len(store._pending) == 0  # noqa: SLF001 — no provision was dispatched
 
 
 class TestProvisionAggregatorFailure:

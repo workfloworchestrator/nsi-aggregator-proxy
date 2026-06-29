@@ -30,6 +30,7 @@ from tests.conftest import (
     build_acknowledgment_xml,
     build_empty_query_summary_sync_response,
     build_query_notification_sync_response,
+    build_query_summary_sync_response,
     build_soap_envelope,
     get_pending_correlation_id,
 )
@@ -576,6 +577,10 @@ class TestReserveWithGlobalReservationId:
     async def test_global_reservation_id_stored(self, store: ReservationStore) -> None:
         def nsi_handler(request: httpx.Request) -> httpx.Response:
             cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            # The idempotency pre-query finds no existing reservation for this globalReservationId.
+            if "querySummarySync" in body:
+                return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
             return httpx.Response(200, content=_reserve_response_xml(cid))
 
         def callback_handler(request: httpx.Request) -> httpx.Response:
@@ -602,3 +607,51 @@ class TestReserveWithGlobalReservationId:
                     reservation = store.get("agg-conn-001")
                     assert reservation is not None
                     assert reservation.global_reservation_id == "urn:uuid:550e8400-e29b-41d4-a716-446655440000"
+
+    @pytest.mark.anyio()
+    async def test_duplicate_reserve_reuses_existing(self, store: ReservationStore) -> None:
+        """A retried reserve with the same globalReservationId reuses the aggregator's reservation."""
+        grid = "urn:uuid:550e8400-e29b-41d4-a716-446655440000"
+        new_callback = "http://callback.example.com/retry"
+        delivered: list[str] = []
+        reserve_sent = False
+
+        def nsi_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal reserve_sent
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                # The aggregator already holds a RESERVED reservation for this globalReservationId.
+                return httpx.Response(
+                    200,
+                    content=build_query_summary_sync_response(
+                        connection_id="agg-conn-001", correlation_id=cid, global_reservation_id=grid
+                    ),
+                )
+            reserve_sent = True
+            return httpx.Response(200, content=_reserve_response_xml(cid))
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            delivered.append(str(request.url))
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(nsi_handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+                    resp = await test_client.post(
+                        "/reservations",
+                        json=_reserve_request_body(global_reservation_id=grid, callback_url=new_callback),
+                    )
+
+        assert resp.status_code == 202
+        assert resp.json()["instance"] == "/reservations/agg-conn-001"  # same connection_id
+        assert reserve_sent is False  # no duplicate reserve dispatched
+        assert delivered == [new_callback]  # settled (RESERVED) → re-delivered to the new url
+        assert [r.connection_id for r in store.get_all()] == ["agg-conn-001"]  # no duplicate entry

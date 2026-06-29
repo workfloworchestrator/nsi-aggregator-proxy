@@ -128,9 +128,21 @@ def _build_optional_connection_id_operation(
     return _serialize(envelope)
 
 
-def build_query_summary_sync(header: NsiHeader, connection_id: str | None = None) -> bytes:
-    """Build a NSI querySummarySync request envelope."""
-    return _build_optional_connection_id_operation(header, "querySummarySync", connection_id)
+def build_query_summary_sync(
+    header: NsiHeader, connection_id: str | None = None, global_reservation_id: str | None = None
+) -> bytes:
+    """Build a NSI querySummarySync request envelope.
+
+    Optionally filtered by connectionId and/or globalReservationId (the schema orders connectionId
+    before globalReservationId).
+    """
+    envelope, body = _build_envelope(header)
+    op = etree.SubElement(body, f"{_C}querySummarySync")
+    if connection_id is not None:
+        etree.SubElement(op, "connectionId").text = connection_id
+    if global_reservation_id is not None:
+        etree.SubElement(op, "globalReservationId").text = global_reservation_id
+    return _serialize(envelope)
 
 
 def build_query_recursive(header: NsiHeader, connection_id: str | None = None) -> bytes:

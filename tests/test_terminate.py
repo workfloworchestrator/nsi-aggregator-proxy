@@ -131,6 +131,35 @@ class TestTerminateValidation:
         assert resp.status_code == 409
 
 
+class TestTerminateIdempotency:
+    """A retried terminate on an already-terminated connection re-delivers instead of re-dispatching."""
+
+    @pytest.mark.anyio()
+    async def test_terminate_already_terminated_redelivers_callback(self, store: ReservationStore) -> None:
+        store.create(_make_reservation(status=ReservationStatus.TERMINATED))
+        new_callback = "http://callback.example.com/retry"
+        delivered: list[str] = []
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            delivered.append(str(request.url))
+            return httpx.Response(200)
+
+        # Terminated lifecycle → TERMINATED: re-deliver the result to the new url, do not re-terminate.
+        handler = _make_nsi_handler(lifecycle_state="Terminated")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    resp = await client.request(
+                        "DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": new_callback}
+                    )
+        assert resp.status_code == 202
+        assert delivered == [new_callback]
+        assert len(store._pending) == 0  # noqa: SLF001 — no terminate was dispatched
+
+
 class TestTerminateAggregatorFailure:
     """Test when the aggregator is unreachable or returns errors."""
 

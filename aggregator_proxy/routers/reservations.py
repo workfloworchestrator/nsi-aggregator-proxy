@@ -91,6 +91,14 @@ ACCEPTED_TYPE = "https://github.com/workfloworchestrator/nsi-aggregator-proxy#20
 _SOAP_ACTION_BASE = "http://schemas.ogf.org/nsi/2013/12/connection/service"
 
 
+def _accepted(connection_id: str) -> JSONResponse:
+    """The standard 202 Accepted response pointing at the reservation resource."""
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=AcceptedResponse(type=ACCEPTED_TYPE, instance=f"/reservations/{connection_id}").model_dump(),
+    )
+
+
 def _soap_headers(operation: str) -> dict[str, str]:
     """Return SOAP HTTP headers with the correct SOAPAction for the given NSI operation."""
     return {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{_SOAP_ACTION_BASE}/{operation}"'}
@@ -537,6 +545,39 @@ async def _refresh_all_reservations(
     return query_reservations
 
 
+async def _find_reservation_by_global_id(
+    global_reservation_id: str,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> Reservation | None:
+    """Return the live (non-terminated) reservation the aggregator holds for this globalReservationId.
+
+    The aggregator is the source of truth, so this makes reserve idempotency survive a proxy restart
+    (which loses the in-memory store and is itself a likely cause of the lost callback being retried).
+    Returns None when the aggregator has no matching, non-terminated reservation.
+    """
+    header = _query_header()
+    soap_bytes = build_query_summary_sync(header, global_reservation_id=global_reservation_id)
+    try:
+        response = await nsi_client.post(
+            settings.provider_url, content=soap_bytes, headers=_soap_headers("querySummarySync")
+        )
+        _raise_for_status(response, "querySummarySync")
+    except Exception as exc:
+        logger.error(
+            "Failed to query aggregator by globalReservationId",
+            global_reservation_id=global_reservation_id,
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+    # Defensively re-filter on the id in case the aggregator ignores the filter element.
+    candidates = [
+        qr for qr in parse_query_summary_sync(response.content) if qr.global_reservation_id == global_reservation_id
+    ]
+    resolved = await asyncio.gather(*(_finalize_refresh(qr, nsi_client, store) for qr in candidates))
+    return next((r for r, _ in resolved if r.status is not ReservationStatus.TERMINATED), None)
+
+
 async def _complete_reserve(
     connection_id: str,
     reserve_future: asyncio.Future,
@@ -673,6 +714,25 @@ async def create_reservation(
             ),
         )
 
+    # Idempotency: a retried reserve re-sends the same globalReservationId (the requester sets it
+    # before its callback step, so it survives the retry). If the aggregator already holds a
+    # non-terminated reservation for it, adopt the retry's new callbackURL and reuse that reservation
+    # instead of creating a duplicate.
+    if body.globalReservationId is not None:
+        existing = await _find_reservation_by_global_id(body.globalReservationId, nsi_client, store)
+        if existing is not None:
+            existing.callback_url = str(body.callbackURL)
+            # Settled (RESERVED / FAILED): re-deliver the outcome now. Still RESERVING: a live
+            # _complete_reserve task (the common, same-process case) delivers to the updated url.
+            if existing.status is not ReservationStatus.RESERVING:
+                await _send_callback(callback_client, existing.callback_url, existing)
+            log.info(
+                "Idempotent reserve: reusing existing reservation",
+                connection_id=existing.connection_id,
+                status=existing.status,
+            )
+            return _accepted(existing.connection_id)
+
     correlation_id = f"urn:uuid:{uuid4()}"
     # Register the future BEFORE sending the SOAP request so the callback
     # can never arrive before we are ready to receive it.
@@ -738,13 +798,7 @@ async def create_reservation(
         name=f"reserve-{connection_id}",
     )
 
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content=AcceptedResponse(
-            type=ACCEPTED_TYPE,
-            instance=f"/reservations/{connection_id}",
-        ).model_dump(),
-    )
+    return _accepted(connection_id)
 
 
 async def _await_dataplane_change(
@@ -854,13 +908,24 @@ async def provision_reservation(
     reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
-    if reservation.status != ReservationStatus.RESERVED:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Reservation is in {reservation.status} state, must be RESERVED to provision",
-        )
 
+    # Idempotent on retry: adopt the (possibly new) callbackURL, then dispatch on the refreshed status.
     reservation.callback_url = str(body.callbackURL)
+    match reservation.status:
+        case ReservationStatus.ACTIVATED:
+            # Already provisioned — re-deliver the result now.
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+            return _accepted(connectionId)
+        case ReservationStatus.ACTIVATING:
+            # Provision already in flight — the running _complete_provision delivers to the new url.
+            return _accepted(connectionId)
+        case ReservationStatus.RESERVED:
+            pass  # normal path below
+        case _:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Reservation is in {reservation.status} state, must be RESERVED to provision",
+            )
 
     correlation_id = f"urn:uuid:{uuid4()}"
     provision_future = store.register_pending(correlation_id)
@@ -896,10 +961,7 @@ async def provision_reservation(
         name=f"provision-{connectionId}",
     )
 
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content=AcceptedResponse(type=ACCEPTED_TYPE, instance=f"/reservations/{connectionId}").model_dump(),
-    )
+    return _accepted(connectionId)
 
 
 async def _complete_release(
@@ -982,13 +1044,26 @@ async def release_reservation(
     reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
-    if reservation.status != ReservationStatus.ACTIVATED:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Reservation is in {reservation.status} state, must be ACTIVATED to release",
-        )
 
+    # Idempotent on retry: adopt the (possibly new) callbackURL, then dispatch on the refreshed status.
+    # RESERVED is release's success state; since the requester only releases an ACTIVATED subscription,
+    # reaching RESERVED here means the release already happened, so re-deliver rather than 409.
     reservation.callback_url = str(body.callbackURL)
+    match reservation.status:
+        case ReservationStatus.RESERVED:
+            # Already released — re-deliver the result now.
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+            return _accepted(connectionId)
+        case ReservationStatus.DEACTIVATING:
+            # Release already in flight — the running _complete_release delivers to the new url.
+            return _accepted(connectionId)
+        case ReservationStatus.ACTIVATED:
+            pass  # normal path below
+        case _:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Reservation is in {reservation.status} state, must be ACTIVATED to release",
+            )
 
     correlation_id = f"urn:uuid:{uuid4()}"
     release_future = store.register_pending(correlation_id)
@@ -1024,10 +1099,7 @@ async def release_reservation(
         name=f"release-{connectionId}",
     )
 
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content=AcceptedResponse(type=ACCEPTED_TYPE, instance=f"/reservations/{connectionId}").model_dump(),
-    )
+    return _accepted(connectionId)
 
 
 async def _complete_terminate(
@@ -1096,13 +1168,23 @@ async def terminate_reservation(
     reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
-    if reservation.status not in (ReservationStatus.RESERVED, ReservationStatus.FAILED):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Reservation is in {reservation.status} state, must be RESERVED or FAILED to terminate",
-        )
 
+    # Idempotent on retry: adopt the (possibly new) callbackURL, then dispatch on the refreshed status.
+    # Terminate has no distinct in-flight state, so a duplicate while the first is mid-flight still
+    # re-sends (harmless: terminate is idempotent at the aggregator and both paths end TERMINATED).
     reservation.callback_url = str(body.callbackURL)
+    match reservation.status:
+        case ReservationStatus.TERMINATED:
+            # Already terminated — re-deliver the result now.
+            await _send_callback(callback_client, reservation.callback_url, reservation)
+            return _accepted(connectionId)
+        case ReservationStatus.RESERVED | ReservationStatus.FAILED:
+            pass  # normal path below
+        case _:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Reservation is in {reservation.status} state, must be RESERVED or FAILED to terminate",
+            )
 
     correlation_id = f"urn:uuid:{uuid4()}"
     terminate_future = store.register_pending(correlation_id)
@@ -1136,10 +1218,7 @@ async def terminate_reservation(
         name=f"terminate-{connectionId}",
     )
 
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content=AcceptedResponse(type=ACCEPTED_TYPE, instance=f"/reservations/{connectionId}").model_dump(),
-    )
+    return _accepted(connectionId)
 
 
 def _build_reservation_detail(

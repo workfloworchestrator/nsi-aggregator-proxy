@@ -155,6 +155,7 @@ class TestTerminateIdempotency:
                     resp = await client.request(
                         "DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": new_callback}
                     )
+                    await asyncio.sleep(0.1)  # let the background re-delivery run while cb_client is open
         assert resp.status_code == 202
         assert delivered == [new_callback]
         assert len(store._pending) == 0  # noqa: SLF001 — no terminate was dispatched

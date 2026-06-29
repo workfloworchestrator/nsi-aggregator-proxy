@@ -649,6 +649,7 @@ class TestReserveWithGlobalReservationId:
                         "/reservations",
                         json=_reserve_request_body(global_reservation_id=grid, callback_url=new_callback),
                     )
+                    await asyncio.sleep(0.1)  # let the background re-delivery run while cb_client is open
 
         assert resp.status_code == 202
         assert resp.json()["instance"] == "/reservations/agg-conn-001"  # same connection_id

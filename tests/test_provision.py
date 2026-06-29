@@ -181,9 +181,38 @@ class TestProvisionIdempotency:
                     resp = await client.post(
                         f"/reservations/{CONNECTION_ID}/provision", json={"callbackURL": new_callback}
                     )
+                    await asyncio.sleep(0.1)  # let the background re-delivery run while cb_client is open
         assert resp.status_code == 202
         assert delivered == [new_callback]
         assert len(store._pending) == 0  # noqa: SLF001 — no provision was dispatched
+
+    @pytest.mark.anyio()
+    async def test_redelivery_retries_past_409(self, store: ReservationStore, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Re-delivery retries while the requester rejects with 409 (not yet AWAITING_CALLBACK)."""
+        from aggregator_proxy.routers import reservations as reservations_module
+
+        monkeypatch.setattr(reservations_module, "_REDELIVER_DELAY_SECONDS", 0.01)
+        store.create(_make_reservation(status=ReservationStatus.ACTIVATED))
+        codes: list[int] = []
+
+        def callback_handler(request: httpx.Request) -> httpx.Response:
+            code = 409 if len(codes) < 2 else 200  # reject twice (still re-awaiting), then accept
+            codes.append(code)
+            return httpx.Response(code)
+
+        handler = _make_nsi_handler(provision_state="Provisioned", data_plane_active=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    resp = await client.post(
+                        f"/reservations/{CONNECTION_ID}/provision", json={"callbackURL": CALLBACK_URL}
+                    )
+                    await asyncio.sleep(0.2)  # cover three attempts at the patched 0.01s delay
+        assert resp.status_code == 202
+        assert codes == [409, 409, 200]  # retried past the 409 window, then accepted
 
 
 class TestProvisionAggregatorFailure:

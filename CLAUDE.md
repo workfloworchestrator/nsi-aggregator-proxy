@@ -150,6 +150,8 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 - **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), `store.register_pending(correlation_id)` is called *before* the outbound SOAP POST. If the future were registered after, the callback could arrive and be dropped before the future exists.
 - **`DataPlaneStateChange` dual resolution**: the callback router resolves this message via *both* `resolve_pending(correlation_id, ...)` and `resolve_pending_by_connection(connection_id, ...)`. The aggregator sends data-plane notifications with its own self-generated correlationId (not the correlationId used in the provision/release request), so the operation background tasks register a connection-keyed future (`register_pending_by_connection`) that `_await_dataplane_change` loops on.
 - **Reservation store is in-memory only**: there is no database. On restart the store is repopulated from `querySummarySync` at startup, but in-flight `asyncio.Future` objects and pending correlation tracking are lost. Any operation that was waiting for a callback when the process restarted will never complete.
+- **Operations are idempotent on retry**: a caller may re-send an operation after a lost callback (the requester re-fires it; see nsi-orchestrator's `callback_step` timeout). `create_reservation` dedups on `globalReservationId` (querying the aggregator, so it survives a restart) and returns the existing `connectionId` instead of a duplicate. provision/release/terminate replace the binary 409 guard with a three-way match on the refreshed status: normal pre-state sends; in-flight state returns 202 and lets the running task deliver; already-in-target-state re-delivers; anything else is 409.
+- **Settled re-delivery is deferred + retried**: the idempotent paths re-deliver via `_redeliver_settled_callback` as a background task (so the 202 returns first) that retries while the requester returns 409. The requester's retried action step is still mid-POST when the result would otherwise arrive — i.e. before its process re-enters `AWAITING_CALLBACK` — and would reject it. Do **not** revert this to an inline `await _send_callback`.
 
 ### Testing
 
@@ -169,31 +171,6 @@ Tests use `pytest-asyncio` in `auto` mode (all async test functions run automati
 ### Local env file
 
 `aggregator_proxy.env` in the repo root can hold bare `KEY=VALUE` lines (e.g. `PROVIDER_URL=…`, `PROXY_AUTH_ENABLED=true`). Environment variables take precedence. The file is read automatically on startup if present in the working directory.
-
-### Non-obvious invariants
-
-- **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), `store.register_pending(correlation_id)` is called *before* the outbound SOAP POST. If the future were registered after, the callback could arrive and be dropped before the future exists.
-- **`DataPlaneStateChange` dual resolution**: the callback router resolves this message via *both* `resolve_pending(correlation_id, ...)` and `resolve_pending_by_connection(connection_id, ...)`. The aggregator sends data-plane notifications with its own self-generated correlationId (not the correlationId used in the provision/release request), so the operation background tasks register a connection-keyed future (`register_pending_by_connection`) that `_await_dataplane_change` loops on.
-- **Reservation store is in-memory only**: there is no database. On restart the store is repopulated from `querySummarySync` at startup, but in-flight `asyncio.Future` objects and pending correlation tracking are lost. Any operation that was waiting for a callback when the process restarted will never complete.
-
-### Testing
-
-Tests use `pytest-asyncio` in `auto` mode (all async test functions run automatically). Outbound HTTP calls are mocked with `pytest-httpx` (`respx`-style). The `tests/conftest.py` provides shared helpers:
-
-- `build_query_summary_sync_response(connection_id, correlation_id, ...)` — SOAP `querySummarySyncConfirmed` response
-- `build_query_notification_sync_response(correlation_id, *error_events)` — SOAP `queryNotificationSyncConfirmed` response
-- `build_error_event_xml(...)` — `<errorEvent>` XML fragment
-- `build_child_xml(...)` / `build_connection_states_xml(...)` — child segment XML fragments
-- `build_query_summary_sync_response_with_children(...)` / `build_query_recursive_confirmed_response(...)` — responses with path children
-- `build_soap_envelope(body_xml, correlation_id)` — wraps any body XML in a full SOAP envelope
-- `build_acknowledgment_xml(correlation_id)` — NSI acknowledgment response
-- `get_pending_correlation_id(store)` — extract the single pending correlationId from a store (asserts exactly one)
-- `make_reservation(...)` — build a `Reservation` with sensible defaults
-- `store` fixture — fresh `ReservationStore` per test
-
-### Local env file
-
-`aggregator_proxy.env` in the repo root can hold `AGGREGATOR_PROXY_*` values as `KEY=VALUE` lines. Environment variables take precedence. The file is read automatically on startup if present in the working directory.
 
 ### Code style
 

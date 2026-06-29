@@ -385,6 +385,8 @@ async with Client(transport) as client:
 
 Reserve a connection. On acceptance the reservation transitions to `RESERVING`. The proxy sends the NSI `reserve` request, waits for `reserveConfirmed`, automatically sends `reserveCommit`, waits for `reserveCommitConfirmed`, and delivers the final result (`RESERVED` or `FAILED`) to the `callbackURL`.
 
+A repeat `reserve` carrying the same `globalReservationId` is idempotent: instead of creating a duplicate, the proxy reuses the existing reservation, adopts the new `callbackURL`, returns its `connectionId`, and re-delivers the result if it has already settled. This requires `globalReservationId` (without one, repeats are not deduplicated) and lets a caller safely retry a reserve whose callback was lost.
+
 #### Request Body
 
 All fields are required except `globalReservationId` and `serviceType`.
@@ -446,7 +448,7 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/provision
 
-Provision a reserved connection to activate the data plane. Only allowed when the reservation is in the `RESERVED` state. On acceptance it transitions to `ACTIVATING`. The proxy waits for `provisionConfirmed` and then `DataPlaneStateChange(active=True)`, delivering the final result (`ACTIVATED` or `FAILED`) to the `callbackURL`.
+Provision a reserved connection to activate the data plane. Allowed when the reservation is in the `RESERVED` state; on acceptance it transitions to `ACTIVATING`. The proxy waits for `provisionConfirmed` and then `DataPlaneStateChange(active=True)`, delivering the final result (`ACTIVATED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `ACTIVATING` (in flight) or `ACTIVATED` (done) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-provisioning; any other state returns `409`.
 
 #### Request Body
 
@@ -480,7 +482,7 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/release
 
-Release an activated connection to deactivate the data plane. Only allowed when the reservation is in the `ACTIVATED` state. On acceptance it transitions to `DEACTIVATING`. The proxy waits for `releaseConfirmed` and then `DataPlaneStateChange(active=False)`, delivering the final result (`RESERVED` or `FAILED`) to the `callbackURL`.
+Release an activated connection to deactivate the data plane. Allowed when the reservation is in the `ACTIVATED` state; on acceptance it transitions to `DEACTIVATING`. The proxy waits for `releaseConfirmed` and then `DataPlaneStateChange(active=False)`, delivering the final result (`RESERVED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `DEACTIVATING` (in flight) or `RESERVED` (released) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-releasing; any other state returns `409`.
 
 #### Request Body
 
@@ -514,7 +516,7 @@ stateDiagram-v2
 
 ### DELETE /reservations/{connectionId}
 
-Terminate a connection. Only allowed when the reservation is in the `RESERVED` or `FAILED` state. Both successful termination and timeout result in the `TERMINATED` state.
+Terminate a connection. Allowed when the reservation is in the `RESERVED` or `FAILED` state. Both successful termination and timeout result in the `TERMINATED` state. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating; any other state returns `409`.
 
 #### Request Body
 

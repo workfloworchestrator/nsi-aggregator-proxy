@@ -14,7 +14,7 @@ maintainers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi[standard]==0.137.2",
+    "fastapi[standard]==0.138.0",
     "fastmcp==3.4.2",
     "httpx==0.28.1",
     "lxml==6.1.1",
@@ -37,10 +37,10 @@ aggregator-proxy = "aggregator_proxy.main:run"
 dev = [
     "lxml-stubs==0.5.1",
     "mypy==2.1.0",
-    "pytest==9.1.0",
+    "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-httpx==0.36.2",
-    "ruff==0.15.17",
+    "ruff==0.15.19",
 ]
 
 [tool.pytest.ini_options]

@@ -14,7 +14,7 @@ maintainers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi[standard]==0.138.0",
+    "fastapi[standard]==0.138.2",
     "fastmcp==3.4.2",
     "httpx==0.28.1",
     "lxml==6.1.1",
@@ -40,7 +40,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-httpx==0.36.2",
-    "ruff==0.15.19",
+    "ruff==0.15.20",
 ]
 
 [tool.pytest.ini_options]

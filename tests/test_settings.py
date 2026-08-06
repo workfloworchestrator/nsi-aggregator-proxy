@@ -197,3 +197,37 @@ def test_required_groups_parsing(env_value: str, expected: list[str]) -> None:
 def test_malformed_json_groups_raises_validation_error() -> None:
     with pytest.raises(ValidationError, match="Invalid JSON"):
         Settings(oidc_required_groups='["g1", invalid')  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Certificate path validation
+# ---------------------------------------------------------------------------
+
+CERTIFICATE_FIELDS = ["client_cert", "client_key", "ca_file"]
+
+
+@pytest.fixture
+def existing_file(tmp_path: Path) -> Path:
+    """Create a file that certificate path validation should accept."""
+    p = tmp_path / "cert.pem"
+    p.write_text("pem", encoding="utf-8")
+    return p
+
+
+@pytest.mark.parametrize("field", CERTIFICATE_FIELDS)
+def test_certificate_path_rejects_missing_file(field: str, tmp_path: Path) -> None:
+    """A configured certificate path pointing at a missing file aborts startup."""
+    with pytest.raises(ValidationError, match="file not found"):
+        Settings(**{field: tmp_path / "does-not-exist.pem"})  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("field", CERTIFICATE_FIELDS)
+def test_certificate_path_accepts_existing_file(field: str, existing_file: Path) -> None:
+    """An existing file is accepted unchanged."""
+    assert getattr(Settings(**{field: existing_file}), field) == existing_file  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("field", CERTIFICATE_FIELDS)
+def test_certificate_path_accepts_unset(field: str) -> None:
+    """Leaving a certificate path unset stays valid."""
+    assert getattr(Settings(**{field: None}), field) is None  # type: ignore[call-arg]

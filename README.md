@@ -189,9 +189,16 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 
 | Variable | Default | Description |
 |---|---|---|
-| `CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator |
+| `CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator. Optional; must be set together with `CLIENT_KEY` |
 | `CLIENT_KEY` | — | Path to client TLS private key |
-| `CA_FILE` | — | Path to CA bundle for server certificate verification |
+| `CA_FILE` | — | Path to CA bundle for server certificate verification. Use this to reach an aggregator with a private-CA or self-signed certificate |
+
+The aggregator's server certificate is **always verified**, independently of whether a client
+certificate is configured. There is no option to disable verification: point `CA_FILE` at the
+issuing CA to reach an aggregator whose certificate the system trust store does not recognise.
+
+All three paths are validated at startup. A path pointing at a missing file — a typo, or a Secret
+that failed to mount — aborts startup rather than silently weakening the TLS configuration.
 | `NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
 | `DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |

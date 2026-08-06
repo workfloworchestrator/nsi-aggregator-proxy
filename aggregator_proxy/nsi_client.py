@@ -40,10 +40,11 @@ def create_nsi_client() -> httpx.AsyncClient:
         client_cert=settings.client_cert,
         ca_file=settings.ca_file,
     )
-    if settings.ca_file:
-        ssl_context = ssl.create_default_context(cafile=str(settings.ca_file))
-    else:
-        ssl_context = ssl.create_default_context()
+    # Server verification is always enabled and is independent of whether we present a client
+    # certificate. create_default_context sets CERT_REQUIRED and check_hostname, and falls back to
+    # the system trust store when CA_FILE is unset. Paths are validated in Settings, so a missing
+    # file fails at startup rather than silently weakening TLS.
+    ssl_context = ssl.create_default_context(cafile=settings.ca_file)
     if settings.client_cert and settings.client_key:
-        ssl_context.load_cert_chain(certfile=str(settings.client_cert), keyfile=str(settings.client_key))
+        ssl_context.load_cert_chain(certfile=settings.client_cert, keyfile=settings.client_key)
     return httpx.AsyncClient(verify=ssl_context)

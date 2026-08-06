@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     # When not set, the system CA bundle is used.
     ca_file: Path | None = None
 
+    @field_validator("client_cert", "client_key", "ca_file")
+    @classmethod
+    def certificate_file_must_exist(cls, v: Path | None) -> Path | None:
+        """Reject a configured certificate path that is not an existing file.
+
+        Failing at startup is deliberate: a mistyped path or an unmounted Secret must not be
+        allowed to silently weaken the TLS configuration used to reach the aggregator.
+        """
+        if v is not None and not v.is_file():
+            raise ValueError(f"file not found: {v}")
+        return v
+
     # Externally reachable base URL of this proxy (e.g. https://proxy.example.com).
     # Used to construct the replyTo URL in outbound NSI SOAP headers.
     base_url: str

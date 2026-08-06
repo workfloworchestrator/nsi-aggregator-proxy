@@ -43,7 +43,7 @@ This is a **FastAPI** application that exposes a simplified REST API on top of a
 ### Key design points
 
 - **Async throughout**: uses `httpx.AsyncClient` for outbound calls to the NSI aggregator, FastAPI's async handlers, and uvicorn as the ASGI server.
-- **mTLS support**: the `httpx.AsyncClient` (created in `nsi_client.py`) can be configured with a client certificate/key pair and a custom CA bundle for mutual TLS against the aggregator.
+- **mTLS support**: the `httpx.AsyncClient` (created in `nsi_client.py`) builds its SSL context with `ssl.create_default_context(cafile=CA_FILE)`, so the aggregator's server certificate is always verified. The client certificate is optional and orthogonal: it is loaded only when both `CLIENT_CERT` and `CLIENT_KEY` are set. There is no verification opt-out; a private-CA or self-signed aggregator is reached via `CA_FILE`. A `certificate_file_must_exist` validator in `settings.py` rejects certificate paths that do not exist, so misconfiguration fails at startup instead of silently weakening TLS.
 - **Shared client via app state**: the `httpx.AsyncClient` is created at startup in the `lifespan` context manager (`main.py`) and stored in `app.state.nsi_client`. Routers access it through the `get_nsi_client` FastAPI dependency (`dependencies.py`).
 - **Structured logging**: all logging goes through `structlog` with a shared pipeline that also captures uvicorn's stdlib logs. `/health` endpoint access logs are suppressed. Configured in `logging_config.py`.
 - **Settings**: all configuration is via environment variables (bare names, no prefix), managed by `pydantic-settings` (`settings.py`). The required variables are `PROVIDER_URL`, `REQUESTER_NSA`, `PROVIDER_NSA`, and `BASE_URL`.
@@ -124,9 +124,9 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `REQUESTER_NSA` | Yes | — | NSA URN used as requesterNSA in `querySummarySync` requests to the aggregator |
 | `PROVIDER_NSA` | Yes | — | NSA URN of the aggregator; used as providerNSA in all outbound SOAP headers and validated against `providerNSA` in `POST /reservations` |
 | `BASE_URL` | Yes | — | Externally reachable base URL of this proxy; `/nsi/v2/callback` is appended to form the `replyTo` in outbound SOAP headers |
-| `CLIENT_CERT` | No | None | Path to client TLS certificate |
-| `CLIENT_KEY` | No | None | Path to client TLS private key |
-| `CA_FILE` | No | None | Path to CA bundle for server verification |
+| `CLIENT_CERT` | No | None | Path to client TLS certificate. Optional; loaded only together with `CLIENT_KEY`. Validated at startup: a missing file aborts startup |
+| `CLIENT_KEY` | No | None | Path to client TLS private key. Validated at startup |
+| `CA_FILE` | No | None | Path to CA bundle for server verification. Unset uses the system trust store; server verification is always on and cannot be disabled. Validated at startup |
 | `NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
 | `DATAPLANE_TIMEOUT` | No | `300` | Seconds to wait for `DataPlaneStateChange(active=True)` after provision |
 | `LOG_LEVEL` | No | `INFO` | Log level |

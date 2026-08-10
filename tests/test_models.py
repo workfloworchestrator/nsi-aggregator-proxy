@@ -22,6 +22,7 @@ from aggregator_proxy.models import (
     P2PS,
     Criteria,
     DetailLevel,
+    P2PSRequest,
     PathSegment,
     ReservationDetail,
     ReservationRequest,
@@ -82,6 +83,57 @@ def test_invalid_stp_empty() -> None:
         P2PS(capacity=1000, sourceSTP="", destSTP="urn:ogf:network:example.net:2025:port-2")
 
 
+def _p2ps_request(ero: list[str] | None) -> P2PSRequest:
+    return P2PSRequest(
+        capacity=1,
+        sourceSTP="urn:ogf:network:example.net:2025:p",
+        destSTP="urn:ogf:network:example.net:2025:q",
+        ero=ero,
+    )
+
+
+@pytest.mark.parametrize(
+    "ero",
+    [
+        pytest.param(None, id="absent"),
+        pytest.param([], id="empty"),
+        pytest.param(["urn:ogf:network:example.net:2025:transit-1"], id="single-member"),
+        pytest.param(
+            ["urn:ogf:network:a.net:2025:x?vlan=1779", "urn:ogf:network:b.net:2025:y"],
+            id="vlan-suffix-and-multiple",
+        ),
+    ],
+)
+def test_valid_ero(ero: list[str] | None) -> None:
+    assert _p2ps_request(ero).ero == ero
+
+
+@pytest.mark.parametrize(
+    ("ero", "message"),
+    [
+        pytest.param(["not-a-urn"], "STP must be a Network URN", id="not-urn"),
+        pytest.param(
+            ["urn:ogf:network:example.net:2025:ok", "http://nope"],
+            "STP must be a Network URN",
+            id="second-member-invalid",
+        ),
+        pytest.param(
+            [f"urn:ogf:network:example.net:2025:hop-{n}" for n in range(33)],
+            "at most 32 items",
+            id="over-the-length-cap",
+        ),
+    ],
+)
+def test_invalid_ero_rejected(ero: list[str], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _p2ps_request(ero)
+
+
+def test_ero_is_absent_from_the_response_model() -> None:
+    """The response P2PS must not carry an ero: safnari resolves its own, which is not the request."""
+    assert "ero" not in P2PS.model_fields
+
+
 @pytest.mark.parametrize(
     "capacity",
     [
@@ -110,7 +162,7 @@ def test_valid_uuid_urn() -> None:
         globalReservationId="urn:uuid:550e8400-e29b-41d4-a716-446655440000",
         description="test",
         criteria=Criteria(
-            p2ps=P2PS(
+            p2ps=P2PSRequest(
                 capacity=1,
                 sourceSTP="urn:ogf:network:example.net:2025:p",
                 destSTP="urn:ogf:network:example.net:2025:q",
@@ -127,7 +179,7 @@ def test_none_global_reservation_id_accepted() -> None:
     req = ReservationRequest(
         description="test",
         criteria=Criteria(
-            p2ps=P2PS(
+            p2ps=P2PSRequest(
                 capacity=1,
                 sourceSTP="urn:ogf:network:example.net:2025:p",
                 destSTP="urn:ogf:network:example.net:2025:q",
@@ -153,7 +205,7 @@ def test_invalid_uuid_urn_rejected(global_reservation_id: str) -> None:
             globalReservationId=global_reservation_id,
             description="test",
             criteria=Criteria(
-                p2ps=P2PS(
+                p2ps=P2PSRequest(
                     capacity=1,
                     sourceSTP="urn:ogf:network:example.net:2025:p",
                     destSTP="urn:ogf:network:example.net:2025:q",
@@ -170,7 +222,7 @@ def test_uppercase_uuid_accepted() -> None:
         globalReservationId="urn:uuid:550E8400-E29B-41D4-A716-446655440000",
         description="test",
         criteria=Criteria(
-            p2ps=P2PS(
+            p2ps=P2PSRequest(
                 capacity=1,
                 sourceSTP="urn:ogf:network:example.net:2025:p",
                 destSTP="urn:ogf:network:example.net:2025:q",

@@ -68,8 +68,13 @@ def build_reserve(
     start_time: str,
     end_time: str,
     service_type: str = "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE",
+    ero: list[str] | None = None,
 ) -> bytes:
-    """Build a NSI reserve request envelope."""
+    """Build a NSI reserve request envelope.
+
+    ``ero`` is an ordered list of intermediate STPs the path must traverse; each becomes an
+    ``<orderedSTP>`` whose ``order`` attribute is its index.
+    """
     envelope, body = _build_envelope(header)
     reserve = etree.SubElement(body, f"{_C}reserve")
     if global_reservation_id is not None:
@@ -86,6 +91,13 @@ def build_reserve(
     etree.SubElement(p2ps, "symmetricPath").text = "true"
     etree.SubElement(p2ps, "sourceSTP").text = source_stp
     etree.SubElement(p2ps, "destSTP").text = dest_stp
+    if ero:
+        # The p2p and types schemas are both elementFormDefault="unqualified", so ero/orderedSTP/stp
+        # carry no namespace. The XSD sequence puts ero directly after destSTP.
+        ero_element = etree.SubElement(p2ps, "ero")
+        for order, stp in enumerate(ero):
+            ordered_stp = etree.SubElement(ero_element, "orderedSTP", order=str(order))
+            etree.SubElement(ordered_stp, "stp").text = stp
     return _serialize(envelope)
 
 

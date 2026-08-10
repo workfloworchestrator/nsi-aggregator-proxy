@@ -17,8 +17,9 @@
 
 import re
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic import AfterValidator, AnyHttpUrl, BaseModel, Field, field_validator
 
 _UUID_URN_RE = re.compile(
     r"^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -38,6 +39,18 @@ _STP_RE = re.compile(
     r"(?:\?vlan=" + _VLAN_RANGE + r")?"  # optional ?vlan=RANGE
     r"(?:#[A-Za-z0-9_.:\-]+)?$",  # optional #FRAGMENT
 )
+
+
+def _check_stp(v: str) -> str:
+    """Validate an STP is a well-formed Network URN (NURN)."""
+    if not _STP_RE.match(v):
+        raise ValueError(
+            "STP must be a Network URN of the form urn:ogf:network:<FQDN>:<DATE>:<OPAQUE-PART>[?vlan=<RANGE>]"
+        )
+    return v
+
+
+Stp = Annotated[str, AfterValidator(_check_stp)]
 
 
 # ---------------------------------------------------------------------------
@@ -70,22 +83,37 @@ class DetailLevel(StrEnum):
 # ---------------------------------------------------------------------------
 
 
-class P2PS(BaseModel):
-    """Point-to-point service parameters."""
+class P2PSBase(BaseModel):
+    """The point-to-point service parameters common to requests and responses."""
 
     capacity: int = Field(..., gt=0, description="Requested capacity in Mbit/s.")
-    sourceSTP: str = Field(..., description="Source Service Termination Point.")
-    destSTP: str = Field(..., description="Destination Service Termination Point.")
+    sourceSTP: Stp = Field(..., description="Source Service Termination Point.")
+    destSTP: Stp = Field(..., description="Destination Service Termination Point.")
 
-    @field_validator("sourceSTP", "destSTP")
-    @classmethod
-    def validate_stp(cls, v: str) -> str:
-        """Validate STP is a well-formed Network URN (NURN)."""
-        if not _STP_RE.match(v):
-            raise ValueError(
-                "STP must be a Network URN of the form urn:ogf:network:<FQDN>:<DATE>:<OPAQUE-PART>[?vlan=<RANGE>]"
-            )
-        return v
+
+class P2PS(P2PSBase):
+    """Point-to-point service parameters as reported back by the aggregator."""
+
+
+class P2PSRequest(P2PSBase):
+    """Point-to-point service parameters as accepted on POST /reservations.
+
+    A sibling of ``P2PS`` rather than a subclass, so that handing a request to a response model is
+    a type error: the Explicit Route Object is request-only, because the aggregator answers with a
+    *resolved* ERO that means something different from what the caller asked for.
+    """
+
+    # 32 is an arbitrary ceiling, only so an unbounded list cannot be posted; a real path crosses
+    # a handful of SDPs.
+    ero: list[Stp] | None = Field(
+        default=None,
+        max_length=32,
+        description=(
+            "Explicit Route Object: intermediate STPs the path must traverse, in order from source "
+            "to destination, excluding the source and destination STPs themselves. One STP per SDP "
+            "to cross, naming the end facing the source."
+        ),
+    )
 
 
 class Criteria(BaseModel):
@@ -95,7 +123,7 @@ class Criteria(BaseModel):
         default=None,
         description="NSI service type URN.",
     )
-    p2ps: P2PS
+    p2ps: P2PSRequest
 
 
 class CriteriaResponse(BaseModel):

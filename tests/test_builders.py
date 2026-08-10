@@ -15,6 +15,7 @@
 
 """Tests for nsi_soap builder functions — verify XML structure and roundtrip through parser."""
 
+import pytest
 from lxml import etree
 
 from aggregator_proxy.nsi_soap import (
@@ -120,6 +121,57 @@ class TestBuildReserve:
         root = _parse_envelope(xml)
         op = _get_body_operation(root)
         assert op.findtext("globalReservationId") is None
+
+    def _p2ps_with_ero(self, ero: list[str] | None) -> etree._Element:
+        xml = build_reserve(
+            header=_header(),
+            global_reservation_id=None,
+            description="test",
+            capacity=100,
+            source_stp="urn:ogf:network:example.net:2025:src",
+            dest_stp="urn:ogf:network:example.net:2025:dst",
+            start_time="2025-06-01T00:00:00.000Z",
+            end_time="2045-06-01T00:00:00.000Z",
+            ero=ero,
+        )
+        p2ps = _get_body_operation(_parse_envelope(xml)).find(f"criteria/{{{_P}}}p2ps")
+        assert p2ps is not None
+        return p2ps
+
+    @pytest.mark.parametrize("ero", [pytest.param(None, id="none"), pytest.param([], id="empty")])
+    def test_no_ero_element_when_absent(self, ero: list[str] | None) -> None:
+        assert self._p2ps_with_ero(ero).find("ero") is None
+
+    def test_ero_members_are_ordered_and_unqualified(self) -> None:
+        """The ero/orderedSTP/stp elements carry no namespace.
+
+        The XSD test cannot catch this: P2PServiceBaseType ends with
+        <xsd:any namespace="##other" processContents="lax"/>, so an ero built in the types namespace
+        validates clean and is then silently ignored by safnari.
+        """
+        members = ["urn:ogf:network:a.net:2025:hop-1?vlan=1779", "urn:ogf:network:b.net:2025:hop-2"]
+        p2ps = self._p2ps_with_ero(members)
+
+        # find/findall with bare names only match no-namespace elements, so a hit here is the
+        # namespace assertion; the XSD test cannot make it (see the docstring).
+        ero_element = p2ps.find("ero")
+        assert ero_element is not None
+
+        ordered = ero_element.findall("orderedSTP")
+        assert [element.get("order") for element in ordered] == ["0", "1"]
+        assert [element.findtext("stp") for element in ordered] == members
+
+    def test_ero_follows_dest_stp(self) -> None:
+        """The p2p XSD sequence is capacity, directionality, symmetricPath, sourceSTP, destSTP, ero."""
+        p2ps = self._p2ps_with_ero(["urn:ogf:network:a.net:2025:hop-1"])
+        assert [child.tag for child in p2ps] == [
+            "capacity",
+            "directionality",
+            "symmetricPath",
+            "sourceSTP",
+            "destSTP",
+            "ero",
+        ]
 
     def test_custom_service_type(self) -> None:
         xml = build_reserve(

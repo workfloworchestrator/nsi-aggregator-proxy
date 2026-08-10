@@ -20,6 +20,7 @@ import asyncio
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from lxml import etree
 
 from aggregator_proxy.main import app
 from aggregator_proxy.models import ReservationStatus
@@ -174,6 +175,22 @@ class TestReserveValidation:
         resp = client.post("/reservations", json=body)
         assert resp.status_code == 422
 
+    def test_invalid_ero_member_returns_422(self, store: ReservationStore) -> None:
+        """An ERO member must be a NURN.
+
+        Regression guard: the ero validator is separate from the sourceSTP/destSTP one, which would
+        raise TypeError (a 500, not a 422) when handed a list.
+        """
+        app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+        app.state.callback_client = httpx.AsyncClient()
+        app.state.reservation_store = store
+        client = TestClient(app, raise_server_exceptions=False)
+
+        body = _reserve_request_body()
+        body["criteria"]["p2ps"]["ero"] = ["not-a-valid-stp"]
+        resp = client.post("/reservations", json=body)
+        assert resp.status_code == 422
+
     def test_invalid_global_reservation_id_returns_422(self, store: ReservationStore) -> None:
         app.state.nsi_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
         app.state.callback_client = httpx.AsyncClient()
@@ -232,6 +249,49 @@ class TestReserveAggregatorFailure:
 
 class TestReserveHappyPath:
     """Test full reserve flow: RESERVING → reserveConfirmed → reserveCommit → RESERVED."""
+
+    @pytest.mark.anyio()
+    async def test_ero_reaches_the_wire_but_not_the_response(self, store: ReservationStore) -> None:
+        """The ERO is request-only: it goes out in the SOAP but is absent from the stored criteria."""
+        reserve_xml: bytes = b""
+
+        def nsi_handler(request: httpx.Request) -> httpx.Response:
+            nonlocal reserve_xml
+            cid = parse_correlation_id(request.content)
+            body = request.content.decode()
+            if "queryNotificationSync" in body:
+                return httpx.Response(200, content=build_query_notification_sync_response(cid))
+            if "querySummarySync" in body:
+                return httpx.Response(200, content=build_empty_query_summary_sync_response(cid))
+            reserve_xml = request.content
+            return httpx.Response(200, content=_reserve_response_xml(cid))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(nsi_handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+
+                request_body = _reserve_request_body()
+                request_body["criteria"]["p2ps"]["ero"] = [
+                    "urn:ogf:network:a.net:2025:hop-1",
+                    "urn:ogf:network:b.net:2025:hop-2",
+                ]
+
+                async with httpx.AsyncClient(
+                    transport=httpx.ASGITransport(app=app), base_url="http://test"
+                ) as test_client:
+                    resp = await test_client.post("/reservations", json=request_body)
+                    assert resp.status_code == 202
+                    await asyncio.sleep(0.05)
+
+        ordered = etree.fromstring(reserve_xml).findall(".//ero/orderedSTP")
+        assert [element.findtext("stp") for element in ordered] == request_body["criteria"]["p2ps"]["ero"]
+
+        reservation = store.get("agg-conn-001")
+        assert reservation is not None
+        assert reservation.criteria is not None
+        assert reservation.criteria.p2ps.sourceSTP == request_body["criteria"]["p2ps"]["sourceSTP"]
 
     @pytest.mark.anyio()
     async def test_reserve_success(self, store: ReservationStore) -> None:

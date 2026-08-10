@@ -99,6 +99,20 @@ def _accepted(connection_id: str) -> JSONResponse:
     )
 
 
+def _response_p2ps(body: ReservationRequest) -> P2PS:
+    """The stored/echoed form of a request's p2ps, i.e. without its request-only ero."""
+    return P2PS.model_validate(body.criteria.p2ps, from_attributes=True)
+
+
+def _criteria_differs(existing: Reservation, body: ReservationRequest) -> bool:
+    """Whether a reserve retry asks for something other than the reservation it will be given.
+
+    The stored criteria carry no ero, so a request that supplies one can never be shown to match.
+    """
+    stored = existing.criteria
+    return bool(body.criteria.p2ps.ero) or (stored is not None and stored.p2ps != _response_p2ps(body))
+
+
 def _soap_headers(operation: str) -> dict[str, str]:
     """Return SOAP HTTP headers with the correct SOAPAction for the given NSI operation."""
     return {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{_SOAP_ACTION_BASE}/{operation}"'}
@@ -778,6 +792,14 @@ async def create_reservation(
                 connection_id=existing.connection_id,
                 status=existing.status,
             )
+            if _criteria_differs(existing, body):
+                # The reuse path never reads body.criteria, so corrected criteria are ignored. Most
+                # likely on a retry after a rejected path: the caller must use a new
+                # globalReservationId to get a new reservation.
+                log.warning(
+                    "Idempotent reserve: request criteria differ from the existing reservation and are ignored",
+                    connection_id=existing.connection_id,
+                )
             return _accepted(existing.connection_id)
 
     correlation_id = f"urn:uuid:{uuid4()}"
@@ -797,6 +819,7 @@ async def create_reservation(
         start_time=now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         end_time=(now + timedelta(days=365 * 20)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         service_type=body.criteria.serviceType or _DEFAULT_SERVICE_TYPE,
+        ero=body.criteria.p2ps.ero,
     )
 
     log.debug("Outbound SOAP reserve request", xml=soap_bytes.decode())
@@ -833,7 +856,7 @@ async def create_reservation(
             criteria=CriteriaResponse(
                 version=1,
                 serviceType=body.criteria.serviceType,
-                p2ps=body.criteria.p2ps,
+                p2ps=_response_p2ps(body),
             ),
             requester_nsa=body.requesterNSA,
             callback_url=str(body.callbackURL),

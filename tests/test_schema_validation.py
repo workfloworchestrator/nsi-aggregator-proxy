@@ -93,6 +93,20 @@ def nsi_schema() -> etree.XMLSchema:
             ),
             id="reserve_without_global_id",
         ),
+        pytest.param(
+            build_reserve(
+                header=_HEADER,
+                global_reservation_id=None,
+                description="test circuit",
+                capacity=1000,
+                source_stp="urn:ogf:network:example.net:2025:src?vlan=100",
+                dest_stp="urn:ogf:network:example.net:2025:dst?vlan=200",
+                start_time="2025-06-01T00:00:00Z",
+                end_time="2045-06-01T00:00:00Z",
+                ero=["urn:ogf:network:a.net:2025:hop-1?vlan=1779", "urn:ogf:network:b.net:2025:hop-2"],
+            ),
+            id="reserve_with_ero",
+        ),
         pytest.param(build_reserve_commit(_HEADER, "conn-42"), id="reserve_commit"),
         pytest.param(build_provision(_HEADER, "conn-42"), id="provision"),
         pytest.param(build_release(_HEADER, "conn-42"), id="release"),
@@ -131,5 +145,28 @@ def test_schema_rejects_missing_mandatory_element(nsi_schema: etree.XMLSchema) -
     criteria = reserve.find("criteria")
     assert criteria is not None
     reserve.remove(criteria)
+
+    assert not nsi_schema.validate(doc)
+
+
+def test_schema_actually_validates_ero_content(nsi_schema: etree.XMLSchema) -> None:
+    """Prove the <ero> is really validated rather than swallowed by the trailing xsd:any."""
+    xml_bytes = build_reserve(
+        header=_HEADER,
+        global_reservation_id=None,
+        description="test",
+        capacity=100,
+        source_stp="urn:ogf:network:example.net:2025:src",
+        dest_stp="urn:ogf:network:example.net:2025:dst",
+        start_time="2025-06-01T00:00:00Z",
+        end_time="2045-06-01T00:00:00Z",
+        ero=["urn:ogf:network:a.net:2025:hop-1"],
+    )
+    doc = etree.fromstring(xml_bytes)
+
+    # order is use="required" on OrderedStpType; dropping it must fail validation.
+    ordered_stp = doc.find(".//ero/orderedSTP")
+    assert ordered_stp is not None
+    del ordered_stp.attrib["order"]
 
     assert not nsi_schema.validate(doc)

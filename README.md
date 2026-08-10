@@ -396,7 +396,7 @@ A repeat `reserve` carrying the same `globalReservationId` is idempotent: instea
 
 #### Request Body
 
-All fields are required except `globalReservationId` and `serviceType`.
+All fields are required except `globalReservationId`, `serviceType` and `criteria.p2ps.ero`.
 
 ```json
 {
@@ -407,7 +407,8 @@ All fields are required except `globalReservationId` and `serviceType`.
     "p2ps": {
       "capacity": 1000,
       "sourceSTP": "urn:ogf:network:x.domain.toplevel:2020:topology:ps1?vlan=1790",
-      "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790"
+      "destSTP": "urn:ogf:network:y.domain.toplevel:2025:topology:ps2?vlan=1790",
+      "ero": ["urn:ogf:network:z.domain.toplevel:2021:topology:transit1"]
     }
   },
   "requesterNSA": "urn:ogf:network:y.domain.toplevel:2021:requester",
@@ -424,9 +425,31 @@ All fields are required except `globalReservationId` and `serviceType`.
 | `criteria.p2ps.capacity` | integer | Yes | Requested capacity in Mbit/s (must be > 0) |
 | `criteria.p2ps.sourceSTP` | string | Yes | Source Service Termination Point (Network URN) |
 | `criteria.p2ps.destSTP` | string | Yes | Destination Service Termination Point (Network URN) |
+| `criteria.p2ps.ero` | array of string | No | Explicit Route Object: intermediate STPs (Network URNs) the path must traverse, in order from source to destination. See [Explicit Route Object](#explicit-route-object) |
 | `requesterNSA` | string | Yes | NSA URN of the requesting party |
 | `providerNSA` | string | Yes | NSA URN of the target aggregator; must match `PROVIDER_NSA` |
 | `callbackURL` | string | Yes | URL where the reservation result will be delivered |
+
+#### Explicit Route Object
+
+`criteria.p2ps.ero` becomes the p2ps `<ero>` element, an ordered list of `<orderedSTP>` entries whose
+`order` attribute is the array index. It excludes the source and destination STPs themselves.
+
+Name **one STP per SDP the path should cross, the end facing the source**. The Path Computation
+Engine looks the SDP up and derives the far end itself. Naming the wrong end is not rejected: the PCE
+routes around the SDP and returns a path that hairpins through the far domain. Listing both ends of
+one SDP yields a zero-length segment and is never correct.
+
+The ERO is honoured only when the aggregator runs the `sequential` or `tree` PCE algorithm; under
+`chain` the pathfinder copies it onto every child segment without computing against it, so the
+constraint is silently inert.
+
+The ERO is **request-only**. It is deliberately absent from `GET /reservations`,
+`GET /reservations/{connectionId}` and the callback payload: the aggregator answers with its own
+*resolved* route, which is a different thing from what was requested, so echoing it back under the
+same name would be misleading. Note also that the idempotent-reuse path does not read `criteria` at
+all — a repeat `reserve` with the same `globalReservationId` but a corrected ERO returns the original
+reservation unchanged (logged as a warning). Use a new `globalReservationId` to reserve a new path.
 
 #### Response
 

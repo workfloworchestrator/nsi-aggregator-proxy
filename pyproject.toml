@@ -14,13 +14,13 @@ maintainers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi[standard]==0.140.7",
+    "fastapi[standard]==0.141.1",
     "fastmcp==3.4.5",
     "httpx==0.28.1",
     "lxml==6.1.1",
     "pydantic-settings==2.14.2",
     "structlog==26.1.0",
-    "uvicorn[standard]==0.51.0",
+    "uvicorn[standard]==0.52.1",
 ]
 
 [project.urls]
@@ -40,7 +40,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-httpx==0.36.2",
-    "ruff==0.16.0",
+    "ruff==0.16.1",
 ]
 
 [tool.pytest.ini_options]

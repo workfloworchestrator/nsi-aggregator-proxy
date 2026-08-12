@@ -229,7 +229,7 @@ flowchart TB
     NSI(["NSI Client\n(with client certificate)"]):::client
     Aggregator(["NSI Aggregator\n(async SOAP callbacks)"]):::client
     Browser(["Browser User"]):::client
-    SRAM["SRAM IdP\n(OIDC Provider)"]:::external
+    IdP["Identity Provider\n(OIDC)"]:::external
 
     subgraph mTLS_Route["Traefik IngressRoute — aggregator-proxy.dev.automation.surf.net"]
         direction TB
@@ -255,7 +255,7 @@ flowchart TB
 
     oTraefik -.->|"auth subrequest"| OAuth2
     OAuth2 -.->|"200 OK\nX-Auth-Request-Email: ...\nX-Auth-Request-Groups: ..."| oTraefik
-    OAuth2 <-.->|"OIDC login + token refresh"| SRAM
+    OAuth2 <-.->|"OIDC login + token refresh"| IdP
 
     subgraph Aggregator_Proxy["aggregator-proxy (PROXY_AUTH_ENABLED=true)"]
         direction TB

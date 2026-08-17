@@ -41,7 +41,7 @@ The diagram below shows the ANA-GRAM automation stack and how the NSI Aggregator
 
 **Components:**
 
-- [**AMISS**](https://github.com/workfloworchestrator/nsi-mgmt-info) — The NSI Management Information Service, a read-only management portal giving an overview of the services configured on the ANA infrastructure and their operational status. It queries the NSI Orchestrator as its source of truth and the DDS Proxy to reconcile the known topology against it.
+- [**AMISS**](https://github.com/workfloworchestrator/nsi-mgmt-info) — The NSI Management Information Service, a read-only management portal giving an overview of the services configured on the ANA infrastructure and their operational status. It queries the NSI Orchestrator as its source of truth, the DDS Proxy to reconcile the known topology against it, and the NSI Aggregator Proxy for multi-domain circuit paths.
 - [**NSI Orchestrator**](https://github.com/workfloworchestrator/nsi-orchestrator) — Central orchestration layer that manages the lifecycle of topologies, switching services, STPs, SDPs, and multi-domain connections. It uses the DDS Proxy for topology visibility and the NSI Aggregator Proxy as its Network Resource Manager.
 - [**DDS Proxy**](https://github.com/workfloworchestrator/nsi-dds-proxy) — Fetches NML topology documents from the upstream DDS, parses them, and exposes the data as a JSON REST API for use by the NSI Orchestrator.
 - [**NSI Aggregator Proxy**](https://github.com/workfloworchestrator/nsi-aggregator-proxy) (this repository) — Translates simple REST/JSON calls from the NSI Orchestrator into NSI Connection Service v2 SOAP messages toward the NSI Aggregator, abstracting NSI protocol complexity behind a linear state machine.

@@ -133,7 +133,7 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `LOG_LEVEL` | No | `INFO` | Log level |
 | `HOST` | No | `0.0.0.0` | Bind host |
 | `PORT` | No | `8080` | Bind port |
-| `ROOT_PATH` | No | _(empty)_ | ASGI root path prefix for reverse proxy with path stripping |
+| `ROOT_PATH` | No | _(empty)_ | External path prefix the edge strips (e.g. `/aggregator-proxy`). Used only to build the `/docs`, `/redoc` and `/openapi.json` URLs; it is **not** passed to `FastAPI(root_path=...)` |
 | `PROXY_AUTH_ENABLED` | No | `false` | Enable authentication on `/reservations`, `/openapi.json`, `/docs`, and `/redoc`. `/health` stays unauthenticated. |
 | `MTLS_HEADER` | No | _(empty)_ | Header name that nsi-auth sets on successful mTLS validation (e.g. `X-Auth-Method`). When set and auth is enabled, the presence of this header counts as mTLS authentication; `X-Client-DN` is logged for audit. |
 | `OIDC_REQUIRED_GROUPS` | No | `[]` | Groups required for access (JSON array or comma-separated). Single list gates both the portal path and (when MCP is enabled) MCP-mediated calls, so it must include URNs from both providers. |
@@ -147,6 +147,9 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `MCP_OIDC_GROUPS_CLAIM` | No | `groups` | Claim name read from the MCP JWT and forwarded as `X-Auth-Request-Groups` on the internal MCP→REST call. |
 
 ### Non-obvious invariants
+
+- **Do NOT set `FastAPI(root_path=...)`** — same rule as nsi-mgmt-info and nsi-aura. `ROOT_PATH` is applied as an explicit string prefix when building the `/docs`, `/redoc` and `/openapi.json` URLs, nothing more. FastAPI stamps `scope["root_path"]` on every request and `Mount.matches` then sets the sub-app's `root_path` to `root_path + matched_path`; when the edge strips the prefix (or the caller never had one) it is counted twice in `root_path` while never appearing in `path`, Starlette's `if not path.startswith(root_path): return path` guard fires twice, and the mount never strips its own prefix — so every request into the MCP sub-app 404s. Ordinary routes take the same guard harmlessly, which is why `/reservations` kept working and the pod stayed ready during the incident that motivated this. nsi-mgmt-info and nsi-aura hit the identical bug with `StaticFiles`.
+- **Do not derive the prefix from a request header.** `get_swagger_ui_html` interpolates `openapi_url` into a `<script>` block with a bare f-string and does not escape it (`_html_safe_json` is applied to its other parameters but not this one), so a client-settable value there is an XSS sink on the portal origin. The prefix must stay operator configuration.
 
 - **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), `store.register_pending(correlation_id)` is called *before* the outbound SOAP POST. If the future were registered after, the callback could arrive and be dropped before the future exists.
 - **The ERO is request-only, and that asymmetry is deliberate**: `P2PS` (response) and `P2PSRequest` (which adds `ero`) are *siblings* over `P2PSBase`, not parent and child, so passing a request where a response is expected is a mypy error rather than a silent leak into every GET, the callback payload and the MCP tool schemas. The aggregator answers with its own *resolved* route, so echoing the request's ero back under the same name would be misleading. `_response_p2ps` is the one place that converts.

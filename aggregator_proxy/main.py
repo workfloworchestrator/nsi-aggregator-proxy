@@ -96,33 +96,32 @@ def create_app() -> FastAPI:
         description=("REST proxy exposing a simplified connection state-machine on top of an NSI aggregator."),
         version=APP_VERSION,
         lifespan=lifespan,
-        root_path=settings.root_path,
         openapi_url=None,
         docs_url=None,
         redoc_url=None,
     )
 
+    # ROOT_PATH is applied here rather than on the app: FastAPI stamps it on every request scope,
+    # which shifts mounted sub-apps such as MCP. Same rule as nsi-mgmt-info and nsi-aura.
+    prefix = settings.root_path.rstrip("/")
+
     @fastapi_app.get("/openapi.json", include_in_schema=False, dependencies=auth_deps)
-    async def openapi_endpoint(request: Request) -> JSONResponse:
+    async def openapi_endpoint() -> JSONResponse:
         schema = fastapi_app.openapi()
-        root_path = request.scope.get("root_path", "").rstrip("/")
-        if root_path and "servers" not in schema:
-            schema["servers"] = [{"url": root_path}]
-        return JSONResponse(schema)
+        # Copy: openapi() returns a process-wide cached dict.
+        return JSONResponse({**schema, "servers": [{"url": prefix}]} if prefix else schema)
 
     @fastapi_app.get("/docs", include_in_schema=False, dependencies=auth_deps)
-    async def swagger_ui(request: Request) -> HTMLResponse:
-        root_path = request.scope.get("root_path", "").rstrip("/")
+    async def swagger_ui() -> HTMLResponse:
         return get_swagger_ui_html(
-            openapi_url=root_path + "/openapi.json",
+            openapi_url=prefix + "/openapi.json",
             title=fastapi_app.title + " - Swagger UI",
         )
 
     @fastapi_app.get("/redoc", include_in_schema=False, dependencies=auth_deps)
-    async def redoc(request: Request) -> HTMLResponse:
-        root_path = request.scope.get("root_path", "").rstrip("/")
+    async def redoc() -> HTMLResponse:
         return get_redoc_html(
-            openapi_url=root_path + "/openapi.json",
+            openapi_url=prefix + "/openapi.json",
             title=fastapi_app.title + " - ReDoc",
         )
 

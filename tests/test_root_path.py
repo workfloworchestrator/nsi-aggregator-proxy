@@ -24,6 +24,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.applications import Starlette
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from aggregator_proxy.settings import Settings
 
@@ -94,10 +97,55 @@ class TestRootPathRoutes:
             _install_app_state(app)
             assert client.get("/health").status_code == 200
 
-    def test_docs_available_with_root_path(self) -> None:
-        app = _make_app("/aggregator-proxy")
+    @pytest.mark.parametrize(
+        ("root_path", "expected_openapi_url"),
+        [
+            pytest.param("/aggregator-proxy", "/aggregator-proxy/openapi.json", id="with-prefix"),
+            pytest.param("", "/openapi.json", id="no-prefix"),
+        ],
+    )
+    def test_docs_point_at_the_configured_prefix(self, root_path: str, expected_openapi_url: str) -> None:
+        app = _make_app(root_path)
         with TestClient(app) as client:
             _install_app_state(app)
             resp = client.get("/docs")
             assert resp.status_code == 200
             assert "swagger" in resp.text.lower()
+            assert f"url: '{expected_openapi_url}'" in resp.text
+
+
+class TestRootPathDoesNotShadowMounts:
+    """ROOT_PATH must not reach the request scope, or it shifts mounted sub-apps.
+
+    Setting it on the FastAPI app once broke the MCP mount in production: requests into the
+    sub-app 404d while ordinary routes kept answering, so the pod stayed ready. Same rule as
+    nsi-mgmt-info and nsi-aura, which hit this with StaticFiles.
+    """
+
+    @pytest.mark.parametrize(
+        "root_path",
+        [pytest.param("", id="no-prefix"), pytest.param("/aggregator-proxy", id="with-prefix")],
+    )
+    def test_mount_is_reachable_whatever_the_prefix(self, root_path: str) -> None:
+        app = _make_app(root_path)
+        app.mount("/mcp", Starlette(routes=[Route("/", lambda _: PlainTextResponse("reached"))]))
+        with TestClient(app) as client:
+            _install_app_state(app)
+            resp = client.get("/mcp", follow_redirects=True)
+            assert resp.status_code == 200
+            assert resp.text == "reached"
+            assert client.get("/health").status_code == 200
+
+    def test_openapi_servers_follow_the_configured_prefix(self) -> None:
+        app = _make_app("/aggregator-proxy")
+        with TestClient(app) as client:
+            _install_app_state(app)
+            assert client.get("/openapi.json").json()["servers"] == [{"url": "/aggregator-proxy"}]
+
+    def test_openapi_schema_cache_is_not_mutated(self) -> None:
+        """Servers is added to a copy; the cached schema must stay clean for other callers."""
+        app = _make_app("/aggregator-proxy")
+        with TestClient(app) as client:
+            _install_app_state(app)
+            client.get("/openapi.json")
+            assert "servers" not in app.openapi()

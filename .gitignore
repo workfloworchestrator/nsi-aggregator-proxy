@@ -208,3 +208,7 @@ __marimo__/
 
 # Swap files
 *.swp
+
+# Local certificates and keys
+*.pem
+*.key

@@ -20,7 +20,7 @@ dependencies = [
     "lxml==6.1.1",
     "pydantic-settings==2.15.0",
     "structlog==26.1.0",
-    "uvicorn[standard]==0.52.1",
+    "uvicorn[standard]==0.52.3",
 ]
 
 [project.urls]
@@ -36,11 +36,11 @@ aggregator-proxy = "aggregator_proxy.main:run"
 [dependency-groups]
 dev = [
     "lxml-stubs==0.5.1",
-    "mypy==2.3.0",
+    "mypy==2.3.1",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-httpx==0.36.2",
-    "ruff==0.16.2",
+    "ruff==0.16.3",
 ]
 
 [tool.pytest.ini_options]

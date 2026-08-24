@@ -128,8 +128,8 @@ The proxy starts on `http://0.0.0.0:8080` by default. On startup, it queries the
 ### Running with Docker
 
 ```bash
-# Build the image
-docker build -t nsi-aggregator-proxy .
+# Build the image (VERSION is required; see Versioning)
+docker build --build-arg VERSION="$(uvx --from setuptools-scm python -m setuptools_scm)" -t nsi-aggregator-proxy .
 
 # Run the container
 docker run -p 8080:8080 \
@@ -787,6 +787,19 @@ The proxy maps the NSI sub-state machines (reservation, provision, lifecycle, da
 | 7 | Data plane active | `ACTIVATED` |
 | 8 | Provision = `Provisioned` (data plane not yet active) | `ACTIVATING` |
 | 9 | Otherwise | `RESERVED` |
+
+## Versioning
+
+The release git tag is the only place a version is written by hand. `pyproject.toml` declares
+`dynamic = ["version"]` and setuptools-scm derives it: a tag builds `0.4.4`, any other commit builds
+the next patch as a dev release with its commit, `0.4.5.dev3+g1a2b3c4`. The proxy logs that version
+at startup and exposes it via `importlib.metadata.version("aggregator-proxy")`.
+
+The container build has no `.git`, so `.github/workflows/container.yml` checks out with
+`fetch-depth: 0`, resolves the version on the runner, and passes it as `--build-arg VERSION=...`,
+which the `Dockerfile` hands to setuptools-scm as
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGGREGATOR_PROXY`. A build without that argument fails rather
+than producing a mislabelled image.
 
 ## Development
 

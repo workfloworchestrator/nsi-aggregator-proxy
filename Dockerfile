@@ -2,6 +2,8 @@
 #
 # Build stage
 FROM ghcr.io/astral-sh/uv:python3.13-alpine@sha256:81285c44b0ed162841eb91d3e6671dd6e63960b86ef47dcbe34d4a9418112175 AS build
+ARG VERSION
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGGREGATOR_PROXY=${VERSION}
 WORKDIR /app
 COPY pyproject.toml LICENSE README.md ./
 COPY aggregator_proxy aggregator_proxy

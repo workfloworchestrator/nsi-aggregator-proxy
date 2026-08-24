@@ -1,6 +1,6 @@
 [project]
 name = "aggregator-proxy"
-version = "0.4.3.dev1"
+dynamic = ["version"]
 description = "REST proxy for a NSI aggregator."
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,6 +26,12 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/workfloworchestrator/nsi-aggregator-proxy"
 Issues = "https://github.com/workfloworchestrator/nsi-aggregator-proxy/issues"
+
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
 
 [tool.setuptools.packages.find]
 include = ["aggregator_proxy*"]

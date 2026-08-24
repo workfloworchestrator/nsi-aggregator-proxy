@@ -32,8 +32,8 @@ uv run ruff format .
 # Type check
 uv run mypy aggregator_proxy
 
-# Build Docker image
-docker build -t nsi-aggregator-proxy .
+# Build Docker image (VERSION is required; see Versioning)
+docker build --build-arg VERSION="$(uvx --from setuptools-scm python -m setuptools_scm)" -t nsi-aggregator-proxy .
 ```
 
 ## Architecture
@@ -178,6 +178,15 @@ Tests use `pytest-asyncio` in `auto` mode (all async test functions run automati
 ### Local env file
 
 `aggregator_proxy.env` in the repo root can hold bare `KEY=VALUE` lines (e.g. `PROVIDER_URL=…`, `PROXY_AUTH_ENABLED=true`). Environment variables take precedence. The file is read automatically on startup if present in the working directory.
+
+### Versioning
+
+The version is the git tag; never edit it. `pyproject.toml` is `dynamic = ["version"]` with
+setuptools-scm, so a tag builds `0.4.4` and any other commit builds `0.4.5.dev<n>+g<sha>`. The
+container build has no `.git`, so `container.yml` resolves the version on the runner and passes
+`--build-arg VERSION`, which the `Dockerfile` exports as
+`SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AGGREGATOR_PROXY`. Omitting it fails the build by design.
+`uv.lock` records the project as `(dynamic)` and so does not churn per commit.
 
 ### Code style
 

@@ -28,6 +28,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveFailed,
     ReserveResponse,
     ReserveTimeout,
+    SoapFault,
     TerminateConfirmed,
     Variable,
     parse,
@@ -374,3 +375,57 @@ class TestParseCorrelationId:
 </soapenv:Envelope>""".encode()
         with pytest.raises(ValueError, match="correlationId"):
             parse_correlation_id(xml)
+
+
+class TestParseSoapFault:
+    """A provider that rejects an operation answers with a SOAP Fault, not an NSI message.
+
+    Before this was handled, parse() fell through to its catch-all and raised
+    ``ValueError: Unknown NSI operation: 'Fault'``, which the routers turned into an opaque 500 with
+    the provider's reason discarded.
+    """
+
+    def test_fault_without_detail(self) -> None:
+        xml = _envelope("""\
+    <soapenv:Fault>
+      <faultcode>soapenv:Server</faultcode>
+      <faultstring>Connection state machine is in invalid state</faultstring>
+    </soapenv:Fault>""")
+        msg = parse(xml)
+        assert isinstance(msg, SoapFault)
+        assert msg.fault_string == "Connection state machine is in invalid state"
+        assert msg.service_exception is None
+
+    @pytest.mark.parametrize(
+        "exception_tag",
+        [
+            pytest.param("serviceException", id="unqualified"),
+            pytest.param("type:serviceException", id="namespace-qualified"),
+        ],
+    )
+    def test_fault_with_service_exception_detail(self, exception_tag: str) -> None:
+        # Aggregators differ on whether they qualify serviceException inside <detail>.
+        xml = _envelope(f"""\
+    <soapenv:Fault>
+      <faultcode>soapenv:Server</faultcode>
+      <faultstring>Error processing request</faultstring>
+      <detail>
+        <{exception_tag}>
+          <nsaId>urn:ogf:network:example.net:2025:nsa:safnari</nsaId>
+          <errorId>00800</errorId>
+          <text>GENERIC_RM_ERROR: teardown failed</text>
+        </{exception_tag}>
+      </detail>
+    </soapenv:Fault>""")
+        msg = parse(xml)
+        assert isinstance(msg, SoapFault)
+        assert msg.fault_string == "Error processing request"
+        assert msg.service_exception is not None
+        assert msg.service_exception.error_id == "00800"
+        assert msg.service_exception.text == "GENERIC_RM_ERROR: teardown failed"
+
+    def test_fault_without_faultstring_is_still_parsed(self) -> None:
+        xml = _envelope("<soapenv:Fault><faultcode>soapenv:Server</faultcode></soapenv:Fault>")
+        msg = parse(xml)
+        assert isinstance(msg, SoapFault)
+        assert msg.fault_string == "(no faultstring)"

@@ -15,8 +15,12 @@
 
 """Tests for error formatting helpers in reservations router."""
 
-from aggregator_proxy.nsi_soap.parser import ErrorEvent, ServiceException, Variable
-from aggregator_proxy.routers.reservations import _format_last_error, _format_service_exception
+from aggregator_proxy.nsi_soap.parser import Acknowledgment, ErrorEvent, ServiceException, SoapFault, Variable
+from aggregator_proxy.routers.reservations import (
+    _format_last_error,
+    _format_service_exception,
+    _sync_failure_detail,
+)
 
 
 class TestFormatServiceException:
@@ -154,3 +158,30 @@ class TestFormatLastError:
         ]
         result = _format_last_error(events)
         assert result == "forcedEnd"
+
+
+class TestSyncFailureDetail:
+    """The 502 detail must name the provider's reason, not just the message type."""
+
+    def test_soap_fault_without_detail(self) -> None:
+        msg = SoapFault(fault_string="Connection state machine is in invalid state")
+        assert _sync_failure_detail(msg) == (
+            "Aggregator returned a SOAP Fault: Connection state machine is in invalid state"
+        )
+
+    def test_soap_fault_with_service_exception(self) -> None:
+        msg = SoapFault(
+            fault_string="Error processing request",
+            service_exception=ServiceException(
+                nsa_id="urn:ogf:network:agg:2025:nsa",
+                connection_id=None,
+                error_id="00800",
+                text="GENERIC_RM_ERROR: teardown failed",
+            ),
+        )
+        assert _sync_failure_detail(msg) == (
+            "Aggregator returned a SOAP Fault: Error processing request (00800: GENERIC_RM_ERROR: teardown failed)"
+        )
+
+    def test_other_unexpected_message_falls_back_to_the_type_name(self) -> None:
+        assert _sync_failure_detail(Acknowledgment()) == "Unexpected sync response from aggregator: Acknowledgment"

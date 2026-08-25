@@ -59,6 +59,7 @@ from aggregator_proxy.nsi_soap import (
     ReserveResponse,
     ReserveTimeout,
     ServiceException,
+    SoapFault,
     TerminateConfirmed,
     Variable,
     build_provision,
@@ -116,6 +117,17 @@ def _criteria_differs(existing: Reservation, body: ReservationRequest) -> bool:
 def _soap_headers(operation: str) -> dict[str, str]:
     """Return SOAP HTTP headers with the correct SOAPAction for the given NSI operation."""
     return {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": f'"{_SOAP_ACTION_BASE}/{operation}"'}
+
+
+def _sync_failure_detail(sync_msg: NsiMessage) -> str:
+    """Describe an unexpected sync response, naming the provider's reason when it sent a SOAP Fault."""
+    match sync_msg:
+        case SoapFault(fault_string=text, service_exception=ServiceException() as exc):
+            return f"Aggregator returned a SOAP Fault: {text} ({exc.error_id}: {exc.text})"
+        case SoapFault(fault_string=text):
+            return f"Aggregator returned a SOAP Fault: {text}"
+        case _:
+            return f"Unexpected sync response from aggregator: {type(sync_msg).__name__}"
 
 
 def _raise_for_status(response: httpx.Response, operation: str, **extra: object) -> None:
@@ -534,7 +546,7 @@ async def _refresh_reservation_recursive(
         store.cancel_pending(correlation_id)
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+            detail=_sync_failure_detail(sync_msg),
         )
 
     try:
@@ -840,7 +852,7 @@ async def create_reservation(
         store.cancel_pending(correlation_id)
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+            detail=_sync_failure_detail(sync_msg),
         )
 
     connection_id = sync_msg.connection_id
@@ -1023,7 +1035,7 @@ async def provision_reservation(
         store.cancel_pending(correlation_id)
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+            detail=_sync_failure_detail(sync_msg),
         )
 
     store.update_status(connectionId, ReservationStatus.ACTIVATING)
@@ -1163,7 +1175,7 @@ async def release_reservation(
         store.cancel_pending(correlation_id)
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+            detail=_sync_failure_detail(sync_msg),
         )
 
     store.update_status(connectionId, ReservationStatus.DEACTIVATING)
@@ -1286,7 +1298,7 @@ async def terminate_reservation(
         store.cancel_pending(correlation_id)
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected sync response from aggregator: {type(sync_msg).__name__}",
+            detail=_sync_failure_detail(sync_msg),
         )
 
     asyncio.create_task(

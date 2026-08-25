@@ -180,6 +180,14 @@ class QueryRecursiveResult:
     reservations: list[QueryReservation]
 
 
+@dataclass
+class SoapFault:
+    """A SOAP Fault returned instead of an NSI operation; the provider rejected the request."""
+
+    fault_string: str
+    service_exception: ServiceException | None = None
+
+
 NsiMessage = (
     ReserveResponse
     | Acknowledgment
@@ -193,6 +201,7 @@ NsiMessage = (
     | ReleaseConfirmed
     | TerminateConfirmed
     | QueryRecursiveResult
+    | SoapFault
 )
 
 
@@ -207,6 +216,16 @@ def _require(element: etree._Element, tag: str) -> str:
     if result is None:
         raise ValueError(f"Required element <{tag}> not found inside <{etree.QName(element.tag).localname}>")
     return result
+
+
+def _parse_fault(fault_el: etree._Element) -> SoapFault:
+    """Parse a SOAP 1.1 ``<Fault>``; see CLAUDE.md for the namespace rules."""
+    detail_el = fault_el.find("detail")
+    exc_el = detail_el.find(".//{*}serviceException") if detail_el is not None else None
+    return SoapFault(
+        fault_string=fault_el.findtext("faultstring") or "(no faultstring)",
+        service_exception=_parse_service_exception(exc_el) if exc_el is not None else None,
+    )
 
 
 def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
@@ -338,6 +357,9 @@ def parse(xml: XmlInput) -> NsiMessage:
 
         case "queryRecursiveConfirmed":
             return QueryRecursiveResult(reservations=_parse_reservations(operation))
+
+        case "Fault":
+            return _parse_fault(operation)
 
         case _:
             raise ValueError(f"Unknown NSI operation: {local!r}")

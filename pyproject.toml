@@ -17,10 +17,10 @@ dependencies = [
     "fastapi[standard]==0.141.1",
     "fastmcp==3.4.7",
     "httpx==0.28.1",
-    "lxml==6.1.1",
+    "lxml==6.1.2",
     "pydantic-settings==2.15.0",
     "structlog==26.1.0",
-    "uvicorn[standard]==0.52.3",
+    "uvicorn[standard]==0.52.4",
 ]
 
 [project.urls]
@@ -46,7 +46,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-httpx==0.36.2",
-    "ruff==0.16.3",
+    "ruff==0.16.4",
 ]
 
 [tool.pytest.ini_options]

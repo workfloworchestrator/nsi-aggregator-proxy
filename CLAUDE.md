@@ -78,7 +78,8 @@ aggregator_proxy/
     builder.py          # NsiHeader dataclass + build_reserve / build_reserve_commit /
                         #   build_provision / build_release / build_terminate /
                         #   build_query_summary_sync / build_query_notification_sync /
-                        #   build_query_recursive (lxml)
+                        #   build_query_recursive (lxml); build_acknowledgment /
+                        #   build_soap_fault are the requester-side callback responses
     parser.py           # parse() dispatcher → typed dataclasses for every inbound
                         #   message type; includes ChildSegment (path segment data) and
                         #   QueryRecursiveResult; see module docstring for classification
@@ -89,6 +90,11 @@ aggregator_proxy/
 The `nsi_soap` package handles the translation between the REST layer and the NSI CS v2 SOAP protocol spoken by the aggregator (e.g. Safnari).
 
 **Building requests** — pass an `NsiHeader` (requester/provider NSA URNs, replyTo URL, auto-generated correlationId) plus operation-specific arguments to the relevant `build_*` function; each returns UTF-8 XML bytes ready to POST.
+
+**Answering callbacks** — `build_acknowledgment(header)` emits the requester-side envelope
+(`protocolVersion` = `…cs.v2.requester+soap`, body `<acknowledgment/>`); `build_soap_fault(faultstring)`
+emits a SOAP 1.1 Fault. Both are returned from `/nsi/v2/callback` as `text/xml; charset=utf-8`.
+`NsiHeader.reply_to` is optional so the acknowledgement can omit it.
 
 **Parsing responses** — call `parse(xml)` on any received SOAP envelope. Both `parse()` and `parse_correlation_id()` accept `XmlInput` (either raw `bytes` or a pre-parsed `etree._Element`), so callers that already have a parsed tree can avoid a redundant `fromstring()`. The function returns one of the typed dataclasses below; use a `match` statement in the caller to handle each case.
 
@@ -160,6 +166,14 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
   namespace, and aggregators disagree on whether they qualify `serviceException` inside `<detail>`, so
   it is matched with `{*}`. Note the fault body is only logged at DEBUG, so at the default `LOG_LEVEL`
   the 502 detail is the only place the reason appears — keep `_sync_failure_detail` reporting it.
+- **Every `/nsi/v2/callback` response needs a SOAP body**: success, parse errors and auth rejections
+  alike. Safnari parses the response to an async callback as SOAP; a body-less `Response(status_code=…)`
+  gives it `SAXParseException … Premature end of file` at line 1 column 1, so it records the delivery
+  as failed and reports `00503 Failed message delivery to peer NSA` even though the proxy processed
+  the callback (observed in dev for `ReleaseConfirmed` and `DataPlaneStateChange`, issue #117). The
+  auth path is covered by the `HTTPException` handler in `main.py`, which routes only this path to
+  `soap_fault_response` and delegates everything else to FastAPI's JSON handler — the REST endpoints
+  must keep returning JSON.
 - **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), `store.register_pending(correlation_id)` is called *before* the outbound SOAP POST. If the future were registered after, the callback could arrive and be dropped before the future exists.
 - **The ERO is request-only, and that asymmetry is deliberate**: `P2PS` (response) and `P2PSRequest` (which adds `ero`) are *siblings* over `P2PSBase`, not parent and child, so passing a request where a response is expected is a mypy error rather than a silent leak into every GET, the callback payload and the MCP tool schemas. The aggregator answers with its own *resolved* route, so echoing the request's ero back under the same name would be misleading. `_response_p2ps` is the one place that converts.
 - **STP validation is the `Stp` annotated type** (`Annotated[str, AfterValidator(_check_stp)]`), not a `@field_validator`. It applies per item, so `list[Stp]` validates each ERO member; a plain field validator would be handed the whole list and raise `TypeError`, which pydantic does not convert into a 422.

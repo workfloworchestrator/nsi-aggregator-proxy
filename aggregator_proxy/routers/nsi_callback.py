@@ -19,6 +19,10 @@ The aggregator POSTs async messages here (reserveConfirmed,
 reserveCommitConfirmed, dataPlaneStateChange, etc.).  Each message is parsed,
 the correlationId is extracted, and the matching pending Future in the
 ReservationStore is resolved so the waiting background task can proceed.
+
+Every response is a SOAP envelope: an ``<acknowledgment/>`` on success, a SOAP Fault otherwise.
+A body-less HTTP response makes the aggregator's SOAP parser fail with "Premature end of file"
+and record the delivery as failed even though the callback was processed.
 """
 
 from typing import Annotated
@@ -29,14 +33,28 @@ from fastapi.responses import Response
 from lxml import etree
 
 from aggregator_proxy.dependencies import get_reservation_store
-from aggregator_proxy.nsi_soap import DataPlaneStateChange, parse, parse_correlation_id
+from aggregator_proxy.nsi_soap import (
+    DataPlaneStateChange,
+    NsiHeader,
+    build_acknowledgment,
+    build_soap_fault,
+    parse,
+    parse_correlation_id,
+)
 from aggregator_proxy.reservation_store import ReservationStore
+from aggregator_proxy.settings import settings
 
 logger = structlog.get_logger(__name__)
 
 NSI_CALLBACK_PATH = "/nsi/v2/callback"
+SOAP_MEDIA_TYPE = "text/xml; charset=utf-8"
 
 router = APIRouter(tags=["nsi-callback"])
+
+
+def soap_fault_response(faultstring: str, status_code: int = 400) -> Response:
+    """Return a SOAP Fault envelope with the given HTTP status code."""
+    return Response(build_soap_fault(faultstring), status_code=status_code, media_type=SOAP_MEDIA_TYPE)
 
 
 @router.post(NSI_CALLBACK_PATH, status_code=200, include_in_schema=False)
@@ -52,14 +70,14 @@ async def nsi_callback(
         root = etree.fromstring(xml_bytes)  # noqa: S320
     except etree.XMLSyntaxError:
         logger.exception("Malformed XML in incoming NSI callback")
-        return Response(status_code=400)
+        return soap_fault_response("Malformed XML in NSI callback")
 
     try:
         correlation_id = parse_correlation_id(root)
         message = parse(root)
-    except ValueError:
+    except ValueError as exc:
         logger.exception("Failed to parse incoming NSI callback")
-        return Response(status_code=400)
+        return soap_fault_response(str(exc))
 
     resolved = store.resolve_pending(correlation_id, message)
 
@@ -73,4 +91,9 @@ async def nsi_callback(
             message_type=type(message).__name__,
         )
 
-    return Response(status_code=200)
+    header = NsiHeader(
+        requester_nsa=settings.requester_nsa,
+        provider_nsa=settings.provider_nsa,
+        correlation_id=correlation_id,
+    )
+    return Response(build_acknowledgment(header), media_type=SOAP_MEDIA_TYPE)

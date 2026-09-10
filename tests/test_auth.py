@@ -33,6 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aggregator_proxy.auth import check_groups
+from aggregator_proxy.nsi_soap import SoapFault, parse
 
 
 def _mock_nsi_client() -> AsyncMock:
@@ -259,6 +260,16 @@ def test_get_mtls_authenticated_callback(
     with _auth_client(mtls_header=mtls_header) as client:
         resp = client.post("/nsi/v2/callback", headers=headers, content=b"")
         assert resp.status_code == expected_status
+
+
+def test_callback_auth_failure_returns_soap_fault() -> None:
+    """The aggregator cannot parse JSON; a rejected callback must still answer SOAP."""
+    with _auth_client(mtls_header="X-Auth-Method") as client:
+        resp = client.post("/nsi/v2/callback", content=b"")
+
+    assert resp.status_code == 401
+    assert resp.headers["content-type"].startswith("text/xml")
+    assert isinstance(parse(resp.content), SoapFault)
 
 
 def test_auth_disabled_lets_everything_through() -> None:

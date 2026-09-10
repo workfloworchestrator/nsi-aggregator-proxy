@@ -17,6 +17,7 @@
 
 from aggregator_proxy.nsi_soap.builder import (
     NsiHeader,
+    build_acknowledgment,
     build_provision,
     build_query_notification_sync,
     build_query_recursive,
@@ -25,6 +26,7 @@ from aggregator_proxy.nsi_soap.builder import (
     build_release,
     build_reserve,
     build_reserve_commit,
+    build_soap_fault,
     build_terminate,
 )
 from aggregator_proxy.nsi_soap.parser import (
@@ -60,6 +62,7 @@ from aggregator_proxy.nsi_soap.parser import (
 
 __all__ = [
     "NsiHeader",
+    "build_acknowledgment",
     "build_provision",
     "build_query_notification_sync",
     "build_query_recursive",
@@ -68,6 +71,7 @@ __all__ = [
     "build_release",
     "build_reserve",
     "build_reserve_commit",
+    "build_soap_fault",
     "build_terminate",
     "Acknowledgment",
     "ChildSegment",

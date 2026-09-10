@@ -336,6 +336,9 @@ The application logs the authenticated identity and group membership for every r
 | `401` | `mTLS authentication required` | No mTLS header on `/nsi/v2/callback` |
 | `403` | `Insufficient group membership` | User not in any of the required groups |
 
+Errors on `/nsi/v2/callback` are returned as a SOAP Fault (`text/xml`), not JSON, because the
+caller on that path is an NSI aggregator that parses every response as SOAP.
+
 ## MCP Endpoint (optional)
 
 The Aggregator Proxy can expose its read-only reservation endpoints as a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, mounted at `/mcp`. This lets AI agents (Claude Desktop, custom agents using `fastmcp.Client`, etc.) list and inspect reservations via MCP **Tools**.

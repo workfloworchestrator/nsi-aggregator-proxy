@@ -20,9 +20,12 @@ import pytest
 
 from aggregator_proxy.main import app
 from aggregator_proxy.nsi_soap import (
+    Acknowledgment,
     DataPlaneStateChange,
     ReserveConfirmed,
+    SoapFault,
     TerminateConfirmed,
+    parse,
 )
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import ReservationStore
@@ -130,6 +133,26 @@ class TestCallbackResolvesPending:
         assert result.connection_id == "conn-1"
 
 
+class TestCallbackAcknowledgement:
+    """Test that the callback returns a SOAP acknowledgement body (issue #117)."""
+
+    @pytest.mark.anyio()
+    async def test_success_returns_soap_acknowledgement(self, store: ReservationStore, _app_state: None) -> None:
+        store.register_pending("urn:uuid:ack-corr")
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            xml = _envelope(
+                "<terminateConfirmed><connectionId>conn-1</connectionId></terminateConfirmed>",
+                correlation_id="urn:uuid:ack-corr",
+            )
+            resp = await client.post("/nsi/v2/callback", content=xml)
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/xml")
+        # Safnari parses the body as SOAP; an empty body is "Premature end of file".
+        assert isinstance(parse(resp.content), Acknowledgment)
+
+
 class TestCallbackUnknownCorrelation:
     """Test callback with unknown correlation ID returns 200 (logged as warning)."""
 
@@ -144,23 +167,31 @@ class TestCallbackUnknownCorrelation:
             assert resp.status_code == 200
 
 
-class TestCallbackInvalidXml:
-    """Test callback with invalid XML returns 400."""
-
-    @pytest.mark.anyio()
-    async def test_invalid_xml_returns_400(self, _app_state: None) -> None:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/nsi/v2/callback", content=b"not xml at all \x00")
-            assert resp.status_code == 400
-
-    @pytest.mark.anyio()
-    async def test_missing_correlation_id_returns_400(self, _app_state: None) -> None:
-        xml = f"""\
+_NO_CORRELATION_ID_XML = f"""\
 <?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="{_S}">
   <soapenv:Header/>
   <soapenv:Body><acknowledgment/></soapenv:Body>
 </soapenv:Envelope>""".encode()
+
+
+class TestCallbackInvalidXml:
+    """Test callback with invalid XML returns 400 with a SOAP Fault body."""
+
+    @pytest.mark.anyio()
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(b"not xml at all \x00", id="malformed-xml"),
+            pytest.param(_NO_CORRELATION_ID_XML, id="missing-correlation-id"),
+        ],
+    )
+    async def test_invalid_input_returns_soap_fault(self, content: bytes, _app_state: None) -> None:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/nsi/v2/callback", content=xml)
-            assert resp.status_code == 400
+            resp = await client.post("/nsi/v2/callback", content=content)
+
+        assert resp.status_code == 400
+        assert resp.headers["content-type"].startswith("text/xml")
+        fault = parse(resp.content)
+        assert isinstance(fault, SoapFault)
+        assert fault.fault_string

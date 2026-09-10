@@ -23,7 +23,8 @@ from contextlib import asynccontextmanager
 import httpx
 import structlog
 import uvicorn
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastmcp.utilities.lifespan import combine_lifespans
@@ -34,6 +35,7 @@ from aggregator_proxy.mcp_server import build_mcp
 from aggregator_proxy.nsi_client import create_nsi_client
 from aggregator_proxy.reservation_store import ReservationStore
 from aggregator_proxy.routers import reservations
+from aggregator_proxy.routers.nsi_callback import NSI_CALLBACK_PATH, soap_fault_response
 from aggregator_proxy.routers.nsi_callback import router as nsi_callback_router
 from aggregator_proxy.routers.reservations import _refresh_all_reservations
 from aggregator_proxy.settings import settings
@@ -127,6 +129,13 @@ def create_app() -> FastAPI:
 
     fastapi_app.include_router(reservations.router, dependencies=auth_deps)
     fastapi_app.include_router(nsi_callback_router, dependencies=callback_auth_deps)
+
+    @fastapi_app.exception_handler(HTTPException)
+    async def soap_or_json_error_handler(request: Request, exc: HTTPException) -> Response:
+        """Answer the NSI callback endpoint with a SOAP Fault; every other route keeps JSON."""
+        if request.url.path.endswith(NSI_CALLBACK_PATH):
+            return soap_fault_response(str(exc.detail), exc.status_code)
+        return await http_exception_handler(request, exc)
 
     @fastapi_app.exception_handler(httpx.HTTPStatusError)
     async def aggregator_error_handler(request: Request, exc: httpx.HTTPStatusError) -> JSONResponse:

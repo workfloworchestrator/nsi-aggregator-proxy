@@ -13,7 +13,11 @@
 # limitations under the License.
 
 
-"""Factory functions for outbound NSI CS v2 SOAP request messages."""
+"""Factory functions for outbound NSI CS v2 SOAP messages.
+
+Mostly provider-side requests; ``build_acknowledgment`` and ``build_soap_fault`` are the
+requester-side responses returned from the inbound callback endpoint.
+"""
 
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -28,6 +32,7 @@ _C = "{%s}" % NSMAP["nsi_ctypes"]
 _P = "{%s}" % NSMAP["nsi_p2p"]
 
 _PROTOCOL_VERSION = "application/vnd.ogf.nsi.cs.v2.provider+soap"
+_REQUESTER_PROTOCOL_VERSION = "application/vnd.ogf.nsi.cs.v2.requester+soap"
 
 
 @dataclass
@@ -36,22 +41,45 @@ class NsiHeader:
 
     requester_nsa: str
     provider_nsa: str
-    reply_to: str
+    reply_to: str | None = None
     correlation_id: str = field(default_factory=lambda: f"urn:uuid:{uuid4()}")
 
 
-def _build_envelope(header: NsiHeader) -> tuple[etree._Element, etree._Element]:
+def _build_envelope(
+    header: NsiHeader, protocol_version: str = _PROTOCOL_VERSION
+) -> tuple[etree._Element, etree._Element]:
     """Return (envelope, body) with the nsiHeader already populated."""
     envelope = etree.Element(f"{_S}Envelope", nsmap=NSMAP)
     soap_header = etree.SubElement(envelope, f"{_S}Header")
     nsi_hdr = etree.SubElement(soap_header, f"{_H}nsiHeader")
-    etree.SubElement(nsi_hdr, "protocolVersion").text = _PROTOCOL_VERSION
+    etree.SubElement(nsi_hdr, "protocolVersion").text = protocol_version
     etree.SubElement(nsi_hdr, "correlationId").text = header.correlation_id
     etree.SubElement(nsi_hdr, "requesterNSA").text = header.requester_nsa
     etree.SubElement(nsi_hdr, "providerNSA").text = header.provider_nsa
-    etree.SubElement(nsi_hdr, "replyTo").text = header.reply_to
+    if header.reply_to is not None:
+        etree.SubElement(nsi_hdr, "replyTo").text = header.reply_to
     body = etree.SubElement(envelope, f"{_S}Body")
     return envelope, body
+
+
+def build_acknowledgment(header: NsiHeader) -> bytes:
+    """Build the acknowledgement envelope returned in response to an inbound NSI callback."""
+    envelope, body = _build_envelope(header, _REQUESTER_PROTOCOL_VERSION)
+    etree.SubElement(body, f"{_C}acknowledgment")
+    return _serialize(envelope)
+
+
+def build_soap_fault(faultstring: str, faultcode: str = "soapenv:Client") -> bytes:
+    """Build a SOAP 1.1 Fault envelope.
+
+    ``faultcode`` and ``faultstring`` are unqualified in SOAP 1.1 even though ``Fault`` itself
+    is in the envelope namespace.
+    """
+    envelope = etree.Element(f"{_S}Envelope", nsmap=NSMAP)
+    fault = etree.SubElement(etree.SubElement(envelope, f"{_S}Body"), f"{_S}Fault")
+    etree.SubElement(fault, "faultcode").text = faultcode
+    etree.SubElement(fault, "faultstring").text = faultstring
+    return _serialize(envelope)
 
 
 def _serialize(envelope: etree._Element) -> bytes:

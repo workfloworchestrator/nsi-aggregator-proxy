@@ -80,6 +80,17 @@ service:
   port: 80
   targetPort: 8080
 
+# -- Issue the TLS certificate for this service with cert-manager
+certificate:
+  enabled: false
+  name: chart-example-tls
+  dnsName: example.domain.toplevel
+  issuerRef:
+    name: letsencrypt
+  secretName: chart-example-tls
+  privateKey:
+    rotationPolicy: Always
+
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false

@@ -155,76 +155,36 @@ router = APIRouter(prefix="/reservations", tags=["reservations"])
 # ---------------------------------------------------------------------------
 
 
+# An orchestrator-core requester answers 409 until its process reaches AWAITING_CALLBACK, which lags
+# the action step's request; a fast result (or an idempotent re-delivery) lands in that window.
+_CALLBACK_ATTEMPTS = 12
+_CALLBACK_RETRY_DELAY_SECONDS = 1.0
+
+
 async def _send_callback(
     callback_client: httpx.AsyncClient,
     callback_url: str,
     reservation: Reservation,
 ) -> None:
-    """POST reservation detail to the caller's callbackURL."""
-    detail = ReservationDetail(
-        globalReservationId=reservation.global_reservation_id,
-        connectionId=reservation.connection_id,
-        description=reservation.description,
-        criteria=reservation.criteria,
-        status=reservation.status,
-        lastError=reservation.last_error,
-    )
-    payload = detail.model_dump()
-    logger.info(
-        "Delivering callback",
-        connection_id=reservation.connection_id,
-        status=reservation.status,
-        callback_url=callback_url,
-    )
-    logger.debug("Outbound JSON callback", callback_url=callback_url, json=payload)
-    try:
-        await callback_client.post(callback_url, json=payload)
-    except Exception as exc:
-        logger.error("Failed to deliver callback", callback_url=callback_url, error=str(exc))
-
-
-# Re-delivering an already-settled result on an idempotent retry races the requester's retried action
-# step: the result can arrive before the process re-enters AWAITING_CALLBACK, which the requester
-# rejects with 409. Retry briefly to cover that window (the requester needs ~a second to re-await).
-_REDELIVER_ATTEMPTS = 12
-_REDELIVER_DELAY_SECONDS = 1.0
-
-
-async def _redeliver_settled_callback(
-    callback_client: httpx.AsyncClient,
-    callback_url: str,
-    reservation: Reservation,
-) -> None:
-    """Background re-delivery of an already-settled result, retrying while the requester returns 409.
-
-    Spawned (not awaited) by the idempotent retry paths so the 202 returns first; the requester's
-    retried action step then re-enters AWAITING_CALLBACK and the retries cover the brief window before
-    it does. A non-409 rejection or a delivery error is logged and ends the attempt.
-    """
-    detail = ReservationDetail(
-        globalReservationId=reservation.global_reservation_id,
-        connectionId=reservation.connection_id,
-        description=reservation.description,
-        criteria=reservation.criteria,
-        status=reservation.status,
-        lastError=reservation.last_error,
-    )
-    payload = detail.model_dump()
+    """POST reservation detail to the caller's callbackURL, retrying while the caller answers 409."""
+    payload = _build_reservation_detail(reservation).model_dump()
     log = logger.bind(connection_id=reservation.connection_id, status=reservation.status, callback_url=callback_url)
-    for attempt in range(1, _REDELIVER_ATTEMPTS + 1):
+    log.info("Delivering callback")
+    log.debug("Outbound JSON callback", json=payload)
+    for attempt in range(1, _CALLBACK_ATTEMPTS + 1):
         try:
             response = await callback_client.post(callback_url, json=payload)
         except Exception as exc:
-            log.error("Failed to deliver settled callback", error=str(exc))
+            log.error("Failed to deliver callback", error=str(exc))
             return
         if response.is_success:
-            log.info("Re-delivered settled callback", attempt=attempt)
+            log.info("Callback delivered", attempt=attempt)
             return
-        if response.status_code != 409:
-            log.error("Settled callback rejected", status_code=response.status_code)
+        if response.status_code != status.HTTP_409_CONFLICT:
+            log.error("Callback rejected", status_code=response.status_code)
             return
-        await asyncio.sleep(_REDELIVER_DELAY_SECONDS)
-    log.error("Gave up re-delivering settled callback", attempts=_REDELIVER_ATTEMPTS)
+        await asyncio.sleep(_CALLBACK_RETRY_DELAY_SECONDS)
+    log.error("Gave up delivering callback", attempts=_CALLBACK_ATTEMPTS)
 
 
 def _query_header() -> NsiHeader:
@@ -797,7 +757,7 @@ async def create_reservation(
             # to the updated url.
             if existing.status is not ReservationStatus.RESERVING:
                 asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
-                    _redeliver_settled_callback(callback_client, existing.callback_url, existing)
+                    _send_callback(callback_client, existing.callback_url, existing)
                 )
             log.info(
                 "Idempotent reserve: reusing existing reservation",
@@ -997,7 +957,7 @@ async def provision_reservation(
         case ReservationStatus.ACTIVATED:
             # Already provisioned — re-deliver after the 202 returns (background, retrying).
             asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
-                _redeliver_settled_callback(callback_client, reservation.callback_url, reservation)
+                _send_callback(callback_client, reservation.callback_url, reservation)
             )
             return _accepted(connectionId)
         case ReservationStatus.ACTIVATING:
@@ -1137,7 +1097,7 @@ async def release_reservation(
         case ReservationStatus.RESERVED:
             # Already released — re-deliver after the 202 returns (background, retrying).
             asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
-                _redeliver_settled_callback(callback_client, reservation.callback_url, reservation)
+                _send_callback(callback_client, reservation.callback_url, reservation)
             )
             return _accepted(connectionId)
         case ReservationStatus.DEACTIVATING:
@@ -1263,7 +1223,7 @@ async def terminate_reservation(
         case ReservationStatus.TERMINATED:
             # Already terminated — re-deliver after the 202 returns (background, retrying).
             asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
-                _redeliver_settled_callback(callback_client, reservation.callback_url, reservation)
+                _send_callback(callback_client, reservation.callback_url, reservation)
             )
             return _accepted(connectionId)
         case ReservationStatus.RESERVED | ReservationStatus.FAILED:

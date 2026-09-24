@@ -191,7 +191,7 @@ class TestProvisionIdempotency:
         """Re-delivery retries while the requester rejects with 409 (not yet AWAITING_CALLBACK)."""
         from aggregator_proxy.routers import reservations as reservations_module
 
-        monkeypatch.setattr(reservations_module, "_REDELIVER_DELAY_SECONDS", 0.01)
+        monkeypatch.setattr(reservations_module, "_CALLBACK_RETRY_DELAY_SECONDS", 0.01)
         store.create(_make_reservation(status=ReservationStatus.ACTIVATED))
         codes: list[int] = []
 

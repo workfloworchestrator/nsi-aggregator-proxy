@@ -771,6 +771,8 @@ When an operation completes (or fails), the proxy sends a POST request to the `c
 
 When the status is `FAILED`, the `lastError` field contains a human-readable description of the error, including NSI `ServiceException` details when available.
 
+If the `callbackURL` answers `409 Conflict`, the proxy retries once a second for about 12 seconds. The result can arrive before the caller is ready to accept it: an orchestrator-core process accepts a callback only once its action step has finished. Any other error response ends delivery and is logged.
+
 ## Error Events
 
 Error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) from the aggregator are detected via `queryNotificationSync` during state refresh. These can cause the status to become `FAILED` even when the NSI sub-state machines appear normal. The `lastError` field contains a human-readable description of the most recent error event.

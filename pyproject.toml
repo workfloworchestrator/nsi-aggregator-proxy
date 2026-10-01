@@ -54,6 +54,8 @@ testpaths = ["tests"]
 
 [tool.uv]
 package = true
+# Skip releases younger than 8 days; keep in sync with minimumReleaseAge in .github/renovate.json.
+exclude-newer = "8 days"
 
 [tool.mypy]
 ignore_missing_imports = true

@@ -15,6 +15,8 @@
 
 """Tests for error formatting helpers in reservations router."""
 
+import pytest
+
 from aggregator_proxy.nsi_soap.parser import Acknowledgment, ErrorEvent, ServiceException, SoapFault, Variable
 from aggregator_proxy.routers.reservations import (
     _format_last_error,
@@ -100,64 +102,64 @@ class TestFormatServiceException:
         assert "child [002] second" in result
 
 
+_AGG = "urn:ogf:network:agg:2025:nsa"
+_SUPA = "urn:ogf:network:canarie.ca:2025:nsa:supa"
+
+
+def _event(notification_id: int = 1, event: str = "activateFailed", exc: ServiceException | None = None) -> ErrorEvent:
+    return ErrorEvent(
+        connection_id="conn-1",
+        notification_id=notification_id,
+        timestamp="2025-06-01T12:00:00Z",
+        event=event,
+        originating_connection_id="orig-1",
+        originating_nsa=_SUPA,
+        service_exception=exc,
+    )
+
+
+def _exc(nsa_id: str, text: str, *children: ServiceException) -> ServiceException:
+    return ServiceException(
+        nsa_id=nsa_id, connection_id=None, error_id="00800", text=text, child_exceptions=list(children) or None
+    )
+
+
 class TestFormatLastError:
     def test_empty_events(self) -> None:
         assert _format_last_error([]) is None
 
-    def test_single_event_with_exception(self) -> None:
-        event = ErrorEvent(
-            connection_id="conn-1",
-            notification_id=1,
-            timestamp="2025-06-01T12:00:00Z",
-            event="activateFailed",
-            originating_connection_id="orig-1",
-            originating_nsa="urn:ogf:network:child:2025:nsa",
-            service_exception=ServiceException(
-                nsa_id="urn:ogf:network:child:2025:nsa",
-                connection_id="orig-1",
-                error_id="00500",
-                text="ACTIVATE_ERROR",
+    @pytest.mark.parametrize(
+        ("events", "expected"),
+        [
+            pytest.param(
+                [_event(exc=_exc(_SUPA, "GENERIC_RM_ERROR"))],
+                f"activateFailed: 00800: GENERIC_RM_ERROR (nsaId={_SUPA})",
+                id="leaf-exception",
             ),
-        )
-        result = _format_last_error([event])
-        assert result == "activateFailed: 00500: ACTIVATE_ERROR"
-
-    def test_single_event_without_exception(self) -> None:
-        event = ErrorEvent(
-            connection_id="conn-1",
-            notification_id=1,
-            timestamp="2025-06-01T12:00:00Z",
-            event="forcedEnd",
-            originating_connection_id="orig-1",
-            originating_nsa="urn:ogf:network:child:2025:nsa",
-            service_exception=None,
-        )
-        result = _format_last_error([event])
-        assert result == "forcedEnd"
-
-    def test_multiple_events_returns_latest(self) -> None:
-        events = [
-            ErrorEvent(
-                connection_id="conn-1",
-                notification_id=1,
-                timestamp="2025-06-01T12:00:00Z",
-                event="activateFailed",
-                originating_connection_id="orig-1",
-                originating_nsa="nsa1",
-                service_exception=None,
+            pytest.param(
+                [_event(event="forcedEnd")],
+                f"forcedEnd (originatingNSA={_SUPA})",
+                id="no-exception",
             ),
-            ErrorEvent(
-                connection_id="conn-1",
-                notification_id=5,
-                timestamp="2025-06-01T13:00:00Z",
-                event="forcedEnd",
-                originating_connection_id="orig-1",
-                originating_nsa="nsa1",
-                service_exception=None,
+            pytest.param(
+                [_event(exc=_exc(_AGG, "wrapped copy", _exc(_SUPA, "Could not open socket")))],
+                f"activateFailed: 00800: Could not open socket (nsaId={_SUPA})",
+                id="aggregator-wraps-child",
             ),
-        ]
-        result = _format_last_error(events)
-        assert result == "forcedEnd"
+            pytest.param(
+                [_event(exc=_exc(_AGG, "wrapped", _exc("urn:a", "first"), _exc("urn:b", "second")))],
+                "activateFailed: 00800: first (nsaId=urn:a); 00800: second (nsaId=urn:b)",
+                id="several-children",
+            ),
+            pytest.param(
+                [_event(notification_id=1), _event(notification_id=5, event="forcedEnd")],
+                f"forcedEnd (originatingNSA={_SUPA})",
+                id="latest-event-wins",
+            ),
+        ],
+    )
+    def test_format(self, events: list[ErrorEvent], expected: str) -> None:
+        assert _format_last_error(events) == expected
 
 
 class TestSyncFailureDetail:

@@ -35,6 +35,7 @@ from lxml import etree
 from aggregator_proxy.dependencies import get_reservation_store
 from aggregator_proxy.nsi_soap import (
     DataPlaneStateChange,
+    ErrorEvent,
     NsiHeader,
     build_acknowledgment,
     build_soap_fault,
@@ -81,8 +82,10 @@ async def nsi_callback(
 
     resolved = store.resolve_pending(correlation_id, message)
 
-    if isinstance(message, DataPlaneStateChange):
-        resolved = store.resolve_pending_by_connection(message.connection_id, message) or resolved
+    # Notifications carry the aggregator's own correlationId, so they reach a waiting operation by connection.
+    match message:
+        case DataPlaneStateChange(connection_id=connection_id) | ErrorEvent(connection_id=connection_id):
+            resolved = store.resolve_pending_by_connection(connection_id, message) or resolved
 
     if not resolved:
         logger.warning(

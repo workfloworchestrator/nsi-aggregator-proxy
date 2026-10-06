@@ -22,6 +22,7 @@ from aggregator_proxy.main import app
 from aggregator_proxy.nsi_soap import (
     Acknowledgment,
     DataPlaneStateChange,
+    ErrorEvent,
     ReserveConfirmed,
     SoapFault,
     TerminateConfirmed,
@@ -29,6 +30,7 @@ from aggregator_proxy.nsi_soap import (
 )
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import ReservationStore
+from tests.conftest import build_error_event_xml
 
 _C = NSMAP["nsi_ctypes"]
 _H = NSMAP["nsi_headers"]
@@ -104,6 +106,24 @@ class TestCallbackResolvesPending:
         result = future.result()
         assert isinstance(result, DataPlaneStateChange)
         assert result.active is True
+
+    @pytest.mark.anyio()
+    async def test_error_event_resolves_by_connection(self, store: ReservationStore, _app_state: None) -> None:
+        """An errorEvent ends a data-plane wait (it used to be rejected as an unknown operation)."""
+        future = store.register_pending_by_connection("conn-1")
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            xml = _envelope(
+                build_error_event_xml(connection_id="conn-1", event="activateFailed"),
+                correlation_id="urn:uuid:aggregator-generated",
+            )
+            resp = await client.post("/nsi/v2/callback", content=xml)
+
+        assert resp.status_code == 200
+        assert isinstance(parse(resp.content), Acknowledgment)
+        result = future.result()
+        assert isinstance(result, ErrorEvent)
+        assert result.event == "activateFailed"
 
     @pytest.mark.anyio()
     async def test_reserve_confirmed_resolves_by_correlation(self, store: ReservationStore, _app_state: None) -> None:

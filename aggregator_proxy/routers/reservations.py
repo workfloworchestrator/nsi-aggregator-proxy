@@ -18,6 +18,7 @@
 import asyncio
 import contextlib
 from datetime import datetime, timedelta, timezone
+from itertools import chain
 from typing import Annotated
 from uuid import uuid4
 
@@ -224,14 +225,31 @@ def _format_service_exception(exc: ServiceException) -> str:
     return "\n".join(parts)
 
 
+def _root_causes(exc: ServiceException) -> list[ServiceException]:
+    """Return the leaves of an exception tree: the errors of the providers that actually failed.
+
+    An aggregator wraps a child's exception, copying its text, so only the leaves are worth showing.
+    """
+    if not exc.child_exceptions:
+        return [exc]
+    return list(chain.from_iterable(_root_causes(child) for child in exc.child_exceptions))
+
+
+def _format_error_event(event: ErrorEvent) -> str:
+    """Format an error event as its event type and the root cause(s), naming the NSA of each."""
+    if event.service_exception is None:
+        return f"{event.event} (originatingNSA={event.originating_nsa})"
+    causes = "; ".join(
+        f"{exc.error_id}: {exc.text} (nsaId={exc.nsa_id})" for exc in _root_causes(event.service_exception)
+    )
+    return f"{event.event}: {causes}"
+
+
 def _format_last_error(error_events: list[ErrorEvent]) -> str | None:
     """Return a human-readable error string from the most recent error event."""
     if not error_events:
         return None
-    latest = max(error_events, key=lambda e: e.notification_id)
-    if latest.service_exception is not None:
-        return f"{latest.event}: {latest.service_exception.error_id}: {latest.service_exception.text}"
-    return latest.event
+    return _format_error_event(max(error_events, key=lambda e: e.notification_id))
 
 
 def _resolve_last_error(
@@ -850,8 +868,8 @@ async def _await_dataplane_change(
     connection_id: str,
     target_active: bool,
     store: ReservationStore,
-) -> bool:
-    """Wait for DataPlaneStateChange matching *target_active*. Returns True on success."""
+) -> DataPlaneStateChange | ErrorEvent | None:
+    """Wait for a DataPlaneStateChange matching *target_active* or any ErrorEvent; None on timeout."""
     remaining = float(settings.dataplane_timeout)
     loop = asyncio.get_running_loop()
     while remaining > 0:
@@ -861,28 +879,54 @@ async def _await_dataplane_change(
             dp_msg = await asyncio.wait_for(dp_future, timeout=remaining)
         except asyncio.TimeoutError:
             store.cancel_pending_by_connection(connection_id)
-            return False
+            return None
         remaining -= loop.time() - start
         match dp_msg:
             case DataPlaneStateChange(active=active) if active == target_active:
-                return True
-            case DataPlaneStateChange():
-                pass
+                return dp_msg
+            case ErrorEvent():
+                return dp_msg
             case _:
                 pass
-    return False
+    return None
+
+
+async def _dataplane_failure(
+    connection_id: str,
+    target_active: bool,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> str | None:
+    """Wait for the data plane to reach *target_active*; return why it did not, or None if it did.
+
+    Any error event fails the operation at once, as the state mapping does. On timeout the aggregator's
+    notification history is checked, in case the errorEvent callback was lost; the operation only
+    starts without error events (else the reservation is FAILED), so any event found is from this wait.
+    """
+    match await _await_dataplane_change(connection_id, target_active, store):
+        case DataPlaneStateChange():
+            return None
+        case ErrorEvent() as event:
+            return _format_error_event(event)
+        case _:
+            notifications = await _query_notifications(nsi_client, connection_id)
+            return (
+                _format_last_error(notifications.error_events)
+                or f"no DataPlaneStateChange(active={target_active}) received within timeout"
+            )
 
 
 async def _complete_provision(
     connection_id: str,
     provision_future: asyncio.Future[NsiMessage],
+    nsi_client: httpx.AsyncClient,
     callback_client: httpx.AsyncClient,
     store: ReservationStore,
 ) -> None:
     """Background task: drive the reservation from ACTIVATING to ACTIVATED or FAILED.
 
     Phase 1 — wait for ProvisionConfirmed (timeout: nsi_timeout).
-    Phase 2 — loop waiting for DataPlaneStateChange(active=True) (timeout: dataplane_timeout).
+    Phase 2 — loop waiting for DataPlaneStateChange(active=True) or an ErrorEvent (timeout: dataplane_timeout).
     """
     log = logger.bind(connection_id=connection_id)
 
@@ -910,8 +954,8 @@ async def _complete_provision(
                 return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
-        if not await _await_dataplane_change(connection_id, target_active=True, store=store):
-            await fail("no DataPlaneStateChange(active=True) received within timeout")
+        if (reason := await _dataplane_failure(connection_id, True, nsi_client, store)) is not None:
+            await fail(reason)
             return
 
         store.update_status(connection_id, ReservationStatus.ACTIVATED)
@@ -1004,7 +1048,7 @@ async def provision_reservation(
     store.update_status(connectionId, ReservationStatus.ACTIVATING)
 
     asyncio.create_task(
-        _complete_provision(connectionId, provision_future, callback_client, store),
+        _complete_provision(connectionId, provision_future, nsi_client, callback_client, store),
         name=f"provision-{connectionId}",
     )
 
@@ -1014,13 +1058,14 @@ async def provision_reservation(
 async def _complete_release(
     connection_id: str,
     release_future: asyncio.Future[NsiMessage],
+    nsi_client: httpx.AsyncClient,
     callback_client: httpx.AsyncClient,
     store: ReservationStore,
 ) -> None:
     """Background task: drive the reservation from DEACTIVATING to RESERVED or FAILED.
 
     Phase 1 — wait for ReleaseConfirmed (timeout: nsi_timeout).
-    Phase 2 — loop waiting for DataPlaneStateChange(active=False) (timeout: dataplane_timeout).
+    Phase 2 — loop waiting for DataPlaneStateChange(active=False) or an ErrorEvent (timeout: dataplane_timeout).
     """
     log = logger.bind(connection_id=connection_id)
 
@@ -1048,8 +1093,8 @@ async def _complete_release(
                 return
 
         # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
-        if not await _await_dataplane_change(connection_id, target_active=False, store=store):
-            await fail("no DataPlaneStateChange(active=False) received within timeout")
+        if (reason := await _dataplane_failure(connection_id, False, nsi_client, store)) is not None:
+            await fail(reason)
             return
 
         store.update_status(connection_id, ReservationStatus.RESERVED)
@@ -1144,7 +1189,7 @@ async def release_reservation(
     store.update_status(connectionId, ReservationStatus.DEACTIVATING)
 
     asyncio.create_task(
-        _complete_release(connectionId, release_future, callback_client, store),
+        _complete_release(connectionId, release_future, nsi_client, callback_client, store),
         name=f"release-{connectionId}",
     )
 

@@ -29,6 +29,7 @@ Asynchronous (POSTed to the replyTo URL):
   - ReserveCommitFailed     — commit failed; state → FAILED
   - ProvisionConfirmed      — provision request accepted by downstream
   - DataPlaneStateChange    — data plane came up (active=True) or went down
+  - ErrorEvent              — a child failed to (de)activate, its data plane failed, or it was ended
   - ReleaseConfirmed        — release succeeded, state returns to RESERVED
   - TerminateConfirmed      — connection terminated
 """
@@ -160,6 +161,19 @@ class DataPlaneStateChange:
 
 
 @dataclass
+class ErrorEvent:
+    """An errorEvent, pushed as a callback or listed by queryNotificationSync."""
+
+    connection_id: str
+    notification_id: int
+    timestamp: str
+    event: str  # activateFailed | deactivateFailed | dataplaneError | forcedEnd
+    originating_connection_id: str
+    originating_nsa: str
+    service_exception: ServiceException | None
+
+
+@dataclass
 class ReleaseConfirmed:
     """Data plane released; state returns to RESERVED."""
 
@@ -198,6 +212,7 @@ NsiMessage = (
     | ReserveCommitConfirmed
     | ProvisionConfirmed
     | DataPlaneStateChange
+    | ErrorEvent
     | ReleaseConfirmed
     | TerminateConfirmed
     | QueryRecursiveResult
@@ -341,6 +356,9 @@ def parse(xml: XmlInput) -> NsiMessage:
 
         case "dataPlaneStateChange":
             return _parse_data_plane_state_change(operation)
+
+        case "errorEvent":
+            return _parse_error_event(operation)
 
         case "releaseConfirmed":
             return ReleaseConfirmed(
@@ -527,19 +545,6 @@ def parse_query_summary_sync(xml_bytes: bytes) -> list[QueryReservation]:
 # ---------------------------------------------------------------------------
 # Query notification sync
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class ErrorEvent:
-    """An errorEvent notification from queryNotificationSync."""
-
-    connection_id: str
-    notification_id: int
-    timestamp: str
-    event: str  # activateFailed | deactivateFailed | dataplaneError | forcedEnd
-    originating_connection_id: str
-    originating_nsa: str
-    service_exception: ServiceException | None
 
 
 @dataclass

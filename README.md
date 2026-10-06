@@ -480,7 +480,7 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/provision
 
-Provision a reserved connection to activate the data plane. Allowed when the reservation is in the `RESERVED` state; on acceptance it transitions to `ACTIVATING`. The proxy waits for `provisionConfirmed` and then `DataPlaneStateChange(active=True)`, delivering the final result (`ACTIVATED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `ACTIVATING` (in flight) or `ACTIVATED` (done) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-provisioning; any other state returns `409`.
+Provision a reserved connection to activate the data plane. Allowed when the reservation is in the `RESERVED` state; on acceptance it transitions to `ACTIVATING`. The proxy waits for `provisionConfirmed` and then `DataPlaneStateChange(active=True)` or an error event (see [Error Events](#error-events)), delivering the final result (`ACTIVATED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `ACTIVATING` (in flight) or `ACTIVATED` (done) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-provisioning; any other state returns `409`.
 
 #### Request Body
 
@@ -514,7 +514,7 @@ stateDiagram-v2
 
 ### POST /reservations/{connectionId}/release
 
-Release an activated connection to deactivate the data plane. Allowed when the reservation is in the `ACTIVATED` state; on acceptance it transitions to `DEACTIVATING`. The proxy waits for `releaseConfirmed` and then `DataPlaneStateChange(active=False)`, delivering the final result (`RESERVED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `DEACTIVATING` (in flight) or `RESERVED` (released) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-releasing; any other state returns `409`.
+Release an activated connection to deactivate the data plane. Allowed when the reservation is in the `ACTIVATED` state; on acceptance it transitions to `DEACTIVATING`. The proxy waits for `releaseConfirmed` and then `DataPlaneStateChange(active=False)` or an error event (see [Error Events](#error-events)), delivering the final result (`RESERVED` or `FAILED`) to the `callbackURL`. A retry once the connection is already `DEACTIVATING` (in flight) or `RESERVED` (released) is idempotent — the proxy adopts the new `callbackURL`, returns `202`, and delivers the result rather than re-releasing; any other state returns `409`.
 
 #### Request Body
 
@@ -776,6 +776,14 @@ If the `callbackURL` answers `409 Conflict`, the proxy retries once a second for
 ## Error Events
 
 Error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) from the aggregator are detected via `queryNotificationSync` during state refresh. These can cause the status to become `FAILED` even when the NSI sub-state machines appear normal. The `lastError` field contains a human-readable description of the most recent error event.
+
+The aggregator also pushes each error event to the proxy as it happens. One that arrives while a provision or release waits for its `DataPlaneStateChange` fails the operation at once, instead of after `DATAPLANE_TIMEOUT`. If the wait does time out, the proxy checks `queryNotificationSync` before giving up, so a lost error event still reaches `lastError`.
+
+`lastError` names the provider that failed, not the aggregator that relayed it, for example:
+
+```
+activateFailed: 00800: GENERIC_RM_ERROR: … (Could not open socket to 192.0.2.1:830) (nsaId=urn:ogf:network:example.net:2025:nsa:supa)
+```
 
 ## State Mapping from NSI
 

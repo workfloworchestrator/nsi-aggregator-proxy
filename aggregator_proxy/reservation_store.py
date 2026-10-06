@@ -51,6 +51,7 @@ class ReservationStore:
         self._reservations: dict[str, Reservation] = {}
         self._pending: dict[str, asyncio.Future[NsiMessage]] = {}
         self._pending_by_connection: dict[str, asyncio.Future[NsiMessage]] = {}
+        self._reserves_in_flight: set[str] = set()
 
     # ------------------------------------------------------------------
     # Reservation CRUD
@@ -84,6 +85,18 @@ class ReservationStore:
                 destSTP=msg.dest_stp,
             ),
         )
+
+    def reserve_started(self, connection_id: str) -> None:
+        """Mark a reserve task as running for this connection."""
+        self._reserves_in_flight.add(connection_id)
+
+    def reserve_finished(self, connection_id: str) -> None:
+        """Mark the reserve task for this connection as done."""
+        self._reserves_in_flight.discard(connection_id)
+
+    def is_reserve_in_flight(self, connection_id: str) -> bool:
+        """True while this proxy's reserve task for the connection has not finished."""
+        return connection_id in self._reserves_in_flight
 
     # ------------------------------------------------------------------
     # Pending correlation tracking

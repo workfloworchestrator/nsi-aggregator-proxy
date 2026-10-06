@@ -331,6 +331,7 @@ class TestReserveHappyPath:
                     await asyncio.sleep(0.05)
                     assert store.get("agg-conn-001") is not None
                     assert store.get("agg-conn-001").status == ReservationStatus.RESERVING  # type: ignore[union-attr]
+                    assert store.is_reserve_in_flight("agg-conn-001")
 
                     # Get the correlation_id from the pending store
                     cid = get_pending_correlation_id(store)
@@ -354,6 +355,7 @@ class TestReserveHappyPath:
                     await asyncio.sleep(0.1)
 
                     assert store.get("agg-conn-001").status == ReservationStatus.RESERVED  # type: ignore[union-attr]
+                    assert not store.is_reserve_in_flight("agg-conn-001")
 
 
 class TestReserveFailedCallback:
@@ -395,6 +397,8 @@ class TestReserveFailedCallback:
                     assert reservation.status == ReservationStatus.FAILED
                     assert reservation.last_error is not None
                     assert "CAPACITY_UNAVAILABLE" in reservation.last_error
+                    # Released on failure too, or the stuck reservation could never be terminated.
+                    assert not store.is_reserve_in_flight("agg-conn-001")
 
 
 class TestReserveTimeoutCallback:

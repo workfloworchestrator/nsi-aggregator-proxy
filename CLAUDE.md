@@ -181,6 +181,14 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 - **`DataPlaneStateChange` dual resolution**: the callback router resolves this message via *both* `resolve_pending(correlation_id, ...)` and `resolve_pending_by_connection(connection_id, ...)`. The aggregator sends data-plane notifications with its own self-generated correlationId (not the correlationId used in the provision/release request), so the operation background tasks register a connection-keyed future (`register_pending_by_connection`) that `_await_dataplane_change` loops on.
 - **Reservation store is in-memory only**: there is no database. On restart the store is repopulated from `querySummarySync` at startup, but in-flight `asyncio.Future` objects and pending correlation tracking are lost. Any operation that was waiting for a callback when the process restarted will never complete.
 - **Operations are idempotent on retry**: a caller may re-send an operation after a lost callback (the requester re-fires it; see nsi-orchestrator's `callback_step` timeout). `create_reservation` dedups on `globalReservationId` (querying the aggregator, so it survives a restart) and returns the existing `connectionId` instead of a duplicate. provision/release/terminate replace the binary 409 guard with a three-way match on the refreshed status: normal pre-state sends; in-flight state returns 202 and lets the running task deliver; already-in-target-state re-delivers; anything else is 409.
+- **Terminate accepts `RESERVING` only when no reserve task of ours is running**: a reserve whose
+  child never answers stays `ReserveChecking` at the aggregator, so the refreshed status is
+  `RESERVING`, while our reserve task has already timed out and reported `FAILED`. Refusing it left
+  the requester no way to clean up. `ReservationStore` tracks running reserve tasks
+  (`reserve_started` before the task is spawned, `reserve_finished` in its `finally`). While one
+  runs, terminate still answers 409 and does not adopt its `callbackURL`, so the reserve result
+  goes where it was asked. After a restart nothing is in flight, so a `RESERVING` reservation is
+  terminable. Safnari accepts terminate while reserving once it has child connection ids.
 - **Every callback delivery retries on 409**: an orchestrator-core requester only reaches `AWAITING_CALLBACK` after its action step has returned and been committed, and answers 409 until then. A result that settles fast (terminating a FAILED reservation confirms in tens of milliseconds) or an idempotent re-delivery lands in that window, so `_send_callback` retries 409s (`_CALLBACK_ATTEMPTS` × `_CALLBACK_RETRY_DELAY_SECONDS`, about 12 s). It must always run in a background task: the idempotent paths spawn it so the 202 returns first, and the `_complete_*` tasks already are one. Do **not** await it inline in an endpoint.
 
 ### Testing

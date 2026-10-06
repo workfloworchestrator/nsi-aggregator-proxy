@@ -115,20 +115,46 @@ class TestTerminateValidation:
         )
         assert resp.status_code == 404
 
-    def test_terminate_activated_state_returns_409(self, store: ReservationStore) -> None:
-        store.create(_make_reservation(status=ReservationStatus.ACTIVATED))
-        # Mock returns Provisioned+active → ACTIVATED, so terminate is rejected
+    @pytest.mark.parametrize(
+        ("status", "handler_states", "reserve_in_flight"),
+        [
+            pytest.param(
+                ReservationStatus.ACTIVATED,
+                {"provision_state": "Provisioned", "data_plane_active": True},
+                False,
+                id="activated",
+            ),
+            pytest.param(
+                ReservationStatus.RESERVING,
+                {"reservation_state": "ReserveChecking"},
+                True,
+                id="reserving-with-our-reserve-in-flight",
+            ),
+        ],
+    )
+    def test_terminate_returns_409(
+        self,
+        store: ReservationStore,
+        status: ReservationStatus,
+        handler_states: dict[str, object],
+        reserve_in_flight: bool,
+    ) -> None:
+        store.create(_make_reservation(status=status))
+        if reserve_in_flight:
+            store.reserve_started(CONNECTION_ID)
         app.state.nsi_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_make_nsi_handler(provision_state="Provisioned", data_plane_active=True))
+            transport=httpx.MockTransport(_make_nsi_handler(**handler_states))  # type: ignore[arg-type]
         )
         app.state.reservation_store = store
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.request(
             "DELETE",
             f"/reservations/{CONNECTION_ID}",
-            json={"callbackURL": CALLBACK_URL},
+            json={"callbackURL": "http://callback.example.com/terminate"},
         )
         assert resp.status_code == 409
+        # A refused terminate must not redirect a running operation's result to its own callback.
+        assert store.get(CONNECTION_ID).callback_url == CALLBACK_URL  # type: ignore[union-attr]
 
 
 class TestTerminateIdempotency:
@@ -241,49 +267,24 @@ class TestTerminateAggregatorFailure:
         assert resp.status_code == 502
 
 
-class TestTerminateFromReserved:
-    """Test successful terminate from RESERVED → TERMINATED."""
+class TestTerminateSucceeds:
+    """Test successful terminate → TERMINATED from every state that allows it."""
 
     @pytest.mark.anyio()
-    async def test_terminate_from_reserved(self, store: ReservationStore) -> None:
-        store.create(_make_reservation(status=ReservationStatus.RESERVED))
+    @pytest.mark.parametrize(
+        ("status", "reservation_state"),
+        [
+            pytest.param(ReservationStatus.RESERVED, "ReserveStart", id="reserved"),
+            pytest.param(ReservationStatus.FAILED, "ReserveTimeout", id="failed"),
+            # A child never answered: our reserve reported FAILED, the aggregator still reserves.
+            pytest.param(ReservationStatus.FAILED, "ReserveChecking", id="reserving-without-our-reserve"),
+        ],
+    )
+    async def test_terminate(self, store: ReservationStore, status: ReservationStatus, reservation_state: str) -> None:
+        store.create(_make_reservation(status=status))
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(_nsi_handler)) as nsi_client:
-            async with httpx.AsyncClient(transport=httpx.MockTransport(_callback_handler)) as cb_client:
-                app.state.nsi_client = nsi_client
-                app.state.callback_client = cb_client
-                app.state.reservation_store = store
-
-                async with httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=app), base_url="http://test"
-                ) as test_client:
-                    resp = await test_client.request(
-                        "DELETE",
-                        f"/reservations/{CONNECTION_ID}",
-                        json={"callbackURL": CALLBACK_URL},
-                    )
-                    assert resp.status_code == 202
-
-                    await asyncio.sleep(0.05)
-
-                    cid = get_pending_correlation_id(store)
-
-                    # Simulate terminateConfirmed callback
-                    await test_client.post("/nsi/v2/callback", content=_terminate_confirmed_xml(cid))
-                    await asyncio.sleep(0.1)
-
-                    assert store.get(CONNECTION_ID).status == ReservationStatus.TERMINATED  # type: ignore[union-attr]
-
-
-class TestTerminateFromFailed:
-    """Test successful terminate from FAILED → TERMINATED."""
-
-    @pytest.mark.anyio()
-    async def test_terminate_from_failed(self, store: ReservationStore) -> None:
-        store.create(_make_reservation(status=ReservationStatus.FAILED))
-
-        failed_handler = _make_nsi_handler(reservation_state="ReserveTimeout")
-        async with httpx.AsyncClient(transport=httpx.MockTransport(failed_handler)) as nsi_client:
+        handler = _make_nsi_handler(reservation_state=reservation_state)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
             async with httpx.AsyncClient(transport=httpx.MockTransport(_callback_handler)) as cb_client:
                 app.state.nsi_client = nsi_client
                 app.state.callback_client = cb_client

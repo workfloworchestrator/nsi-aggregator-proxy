@@ -703,6 +703,8 @@ async def _complete_reserve(
         log.exception("Unexpected error in _complete_reserve")
         with contextlib.suppress(Exception):
             await fail("internal error")
+    finally:
+        store.reserve_finished(connection_id)
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +837,7 @@ async def create_reservation(
         )
     )
 
+    store.reserve_started(connection_id)
     asyncio.create_task(
         _complete_reserve(connection_id, reserve_future, nsi_client, callback_client, store),
         name=f"reserve-{connection_id}",
@@ -1203,9 +1206,9 @@ async def terminate_reservation(
 ) -> JSONResponse:
     """Terminate the connection identified by ``connectionId``.
 
-    Only allowed when the reservation is in the ``RESERVED`` or ``FAILED``
-    state.  On acceptance it transitions to ``TERMINATED``.  The final result
-    is delivered to ``callbackURL``.
+    Allowed when the reservation is ``RESERVED`` or ``FAILED``, or ``RESERVING`` with no reserve of
+    this proxy still waiting on it.  On acceptance it transitions to ``TERMINATED``.  The final
+    result is delivered to ``callbackURL``.
     """
     log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
     log.info("Terminate request received")
@@ -1215,24 +1218,33 @@ async def terminate_reservation(
     if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
 
-    # Idempotent on retry: adopt the (possibly new) callbackURL, then dispatch on the refreshed status.
-    # Terminate has no distinct in-flight state, so a duplicate while the first is mid-flight still
-    # re-sends (harmless: terminate is idempotent at the aggregator and both paths end TERMINATED).
-    reservation.callback_url = str(body.callbackURL)
+    # Idempotent on retry: dispatch on the refreshed status. Terminate has no distinct in-flight
+    # state, so a duplicate while the first is mid-flight still re-sends (harmless: terminate is
+    # idempotent at the aggregator and both paths end TERMINATED).
     match reservation.status:
         case ReservationStatus.TERMINATED:
             # Already terminated — re-deliver after the 202 returns (background, retrying).
+            reservation.callback_url = str(body.callbackURL)
             asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
                 _send_callback(callback_client, reservation.callback_url, reservation)
             )
             return _accepted(connectionId)
         case ReservationStatus.RESERVED | ReservationStatus.FAILED:
             pass  # normal path below
+        case ReservationStatus.RESERVING if not store.is_reserve_in_flight(connectionId):
+            # Stuck at the aggregator: a child never answered, and our reserve already reported
+            # FAILED (or was lost on a restart). The aggregator accepts terminate while reserving.
+            log.info("Terminating a reservation the aggregator still reports as reserving")
         case _:
+            # Rejected before the callbackURL is adopted, so a running reserve still delivers to its own.
             raise HTTPException(
                 status_code=409,
-                detail=f"Reservation is in {reservation.status} state, must be RESERVED or FAILED to terminate",
+                detail=(
+                    f"Reservation is in {reservation.status} state, must be RESERVED, FAILED, "
+                    "or RESERVING without a reserve in progress to terminate"
+                ),
             )
+    reservation.callback_url = str(body.callbackURL)
 
     correlation_id = f"urn:uuid:{uuid4()}"
     terminate_future = store.register_pending(correlation_id)

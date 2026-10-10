@@ -42,10 +42,10 @@ aggregator-proxy = "aggregator_proxy.main:run"
 [dependency-groups]
 dev = [
     "lxml-stubs==0.5.1",
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
-    "ruff==0.16.9",
+    "ruff==0.16.10",
 ]
 
 [tool.pytest.ini_options]

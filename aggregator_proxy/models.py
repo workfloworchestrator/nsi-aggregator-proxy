@@ -209,6 +209,30 @@ class ReservationsListResponse(BaseModel):
     reservations: list[ReservationDetail]
 
 
+class UpaReservation(BaseModel):
+    """A reservation as a uPA reports it, with its raw NSI sub-states."""
+
+    connectionId: str
+    globalReservationId: str | None = None
+    description: str
+    requesterNSA: str
+    reservationState: str
+    provisionState: str
+    lifecycleState: str
+    dataPlaneActive: bool
+    capacity: int | None = None
+    sourceSTP: str | None = None
+    destSTP: str | None = None
+
+
+class UpaReservationsResponse(BaseModel):
+    """Response body for GET /providers/{nsaId}/reservations: every reservation the uPA holds."""
+
+    providerNSA: str
+    providerURL: str
+    reservations: list[UpaReservation]
+
+
 class AcceptedResponse(BaseModel):
     """202 Accepted response body."""
 

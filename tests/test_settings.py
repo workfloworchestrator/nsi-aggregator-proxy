@@ -15,6 +15,7 @@
 
 """Tests for Settings env file loading and cross-field validation."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -231,3 +232,43 @@ def test_certificate_path_accepts_existing_file(field: str, existing_file: Path)
 def test_certificate_path_accepts_unset(field: str) -> None:
     """Leaving a certificate path unset stays valid."""
     assert getattr(Settings(**{field: None}), field) is None  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# uPA query settings
+# ---------------------------------------------------------------------------
+
+UPA_FIELDS = ("dds_proxy_url", "upa_client_cert", "upa_client_key")
+
+
+def _upa_settings(existing_file: Path, fields: Sequence[str]) -> dict[str, object]:
+    return {field: "https://dds-proxy.test" if field == "dds_proxy_url" else existing_file for field in fields}
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [pytest.param(UPA_FIELDS, id="all"), pytest.param((), id="none")],
+)
+def test_upa_settings_accepted_all_or_none(existing_file: Path, fields: Sequence[str]) -> None:
+    """The uPA settings are valid all set or all unset, which turns the endpoint on or off."""
+    settings = Settings(**_upa_settings(existing_file, fields))  # type: ignore[arg-type]
+    assert settings.upa_queries_enabled is bool(fields)
+
+
+@pytest.mark.parametrize("field", ["upa_client_cert", "upa_client_key"])
+def test_upa_certificate_path_rejects_missing_file(existing_file: Path, tmp_path: Path, field: str) -> None:
+    """A uPA certificate path pointing at a missing file aborts startup like the other certificate paths."""
+    values = _upa_settings(existing_file, UPA_FIELDS) | {field: tmp_path / "does-not-exist.pem"}
+    with pytest.raises(ValidationError, match="file not found"):
+        Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [pytest.param(field, id=f"missing-{field}") for field in UPA_FIELDS],
+)
+def test_partial_upa_settings_abort_startup(existing_file: Path, missing: str) -> None:
+    """Any uPA setting without the other two aborts startup instead of leaving the endpoint at 503."""
+    present = [field for field in UPA_FIELDS if field != missing]
+    with pytest.raises(ValidationError, match=f"missing {missing.upper()}"):
+        Settings(**_upa_settings(existing_file, present))  # type: ignore[arg-type]

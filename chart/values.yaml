@@ -28,6 +28,9 @@ fullnameOverride: ""
 #  CLIENT_CERT: client-certificate.pem
 #  CLIENT_KEY: client-private-key.pem
 #  CA_FILE: ca-bundle.pem
+#  DDS_PROXY_URL: https://dds-proxy.example.com
+#  UPA_CLIENT_CERT: aggregator-certificate.pem
+#  UPA_CLIENT_KEY: aggregator-private-key.pem
 #  NSI_TIMEOUT: "180"
 #  DATAPLANE_TIMEOUT: "300"
 #  LOG_LEVEL: INFO

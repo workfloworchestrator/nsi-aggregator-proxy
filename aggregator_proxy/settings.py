@@ -45,11 +45,24 @@ class Settings(BaseSettings):
     client_cert: Path | None = None
     client_key: Path | None = None
 
-    # CA bundle used to verify the NSI aggregator's server certificate.
+    # CA bundle used to verify the server certificate of the aggregator, the dds-proxy and the uPAs.
     # When not set, the system CA bundle is used.
     ca_file: Path | None = None
 
-    @field_validator("client_cert", "client_key", "ca_file")
+    # Base URL of the nsi-dds-proxy, which lists the uPAs the aggregator peers with.
+    dds_proxy_url: str | None = None
+
+    # The aggregator's own client certificate, presented only to its uPAs. Set all three of
+    # DDS_PROXY_URL, UPA_CLIENT_CERT and UPA_CLIENT_KEY to enable GET /providers/{nsaId}/reservations.
+    upa_client_cert: Path | None = None
+    upa_client_key: Path | None = None
+
+    @property
+    def upa_queries_enabled(self) -> bool:
+        """Whether the uPA reservations endpoint is configured."""
+        return self.upa_client_cert is not None
+
+    @field_validator("client_cert", "client_key", "ca_file", "upa_client_cert", "upa_client_key")
     @classmethod
     def certificate_file_must_exist(cls, v: Path | None) -> Path | None:
         """Reject a configured certificate path that is not an existing file.
@@ -65,11 +78,11 @@ class Settings(BaseSettings):
     # Used to construct the replyTo URL in outbound NSI SOAP headers.
     base_url: str
 
-    @field_validator("base_url")
+    @field_validator("base_url", "dds_proxy_url")
     @classmethod
-    def strip_trailing_slash(cls, v: str) -> str:
+    def strip_trailing_slash(cls, v: str | None) -> str | None:
         """Remove trailing slash to avoid double slashes when appending paths."""
-        return v.rstrip("/")
+        return v.rstrip("/") if v is not None else None
 
     # Timeouts (seconds) for waiting on async NSI callbacks.
     nsi_timeout: int = 180
@@ -145,6 +158,19 @@ class Settings(BaseSettings):
                 "otherwise the MCP claim-translation hook would translate unverified JWT claims into "
                 "trusted REST headers."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _require_upa_settings_together(self) -> "Settings":
+        """Refuse a partial uPA configuration, which would otherwise only show up as a 503 later."""
+        upa_settings = {
+            "DDS_PROXY_URL": self.dds_proxy_url,
+            "UPA_CLIENT_CERT": self.upa_client_cert,
+            "UPA_CLIENT_KEY": self.upa_client_key,
+        }
+        unset = [name for name, value in upa_settings.items() if value is None]
+        if 0 < len(unset) < len(upa_settings):
+            raise ValueError(f"{', '.join(upa_settings)} must be set together; missing {', '.join(unset)}")
         return self
 
 

@@ -32,9 +32,9 @@ from fastmcp.utilities.lifespan import combine_lifespans
 from aggregator_proxy.auth import get_authenticated_user, get_mtls_authenticated_callback
 from aggregator_proxy.logging_config import configure_logging
 from aggregator_proxy.mcp_server import build_mcp
-from aggregator_proxy.nsi_client import create_nsi_client
+from aggregator_proxy.nsi_client import create_nsi_client, create_upa_client
 from aggregator_proxy.reservation_store import ReservationStore
-from aggregator_proxy.routers import reservations
+from aggregator_proxy.routers import providers, reservations
 from aggregator_proxy.routers.nsi_callback import NSI_CALLBACK_PATH, soap_fault_response
 from aggregator_proxy.routers.nsi_callback import router as nsi_callback_router
 from aggregator_proxy.routers.reservations import _refresh_all_reservations
@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         **settings.model_dump(mode="json"),
     )
     app.state.nsi_client = create_nsi_client()
+    app.state.upa_client = create_upa_client()
     app.state.callback_client = httpx.AsyncClient()
     app.state.reservation_store = ReservationStore()
 
@@ -78,6 +79,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     logger.info("Shutting down NSI Aggregator Proxy")
     await app.state.nsi_client.aclose()
+    if app.state.upa_client is not None:
+        await app.state.upa_client.aclose()
     await app.state.callback_client.aclose()
 
 
@@ -128,6 +131,7 @@ def create_app() -> FastAPI:
         )
 
     fastapi_app.include_router(reservations.router, dependencies=auth_deps)
+    fastapi_app.include_router(providers.router, dependencies=auth_deps)
     fastapi_app.include_router(nsi_callback_router, dependencies=callback_auth_deps)
 
     @fastapi_app.exception_handler(HTTPException)

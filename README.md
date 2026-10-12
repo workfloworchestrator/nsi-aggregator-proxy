@@ -190,13 +190,19 @@ Alternatively, you can use the included `aggregator_proxy.env` file. Uncomment t
 |---|---|---|
 | `CLIENT_CERT` | — | Path to client TLS certificate for mTLS with the aggregator. Optional; must be set together with `CLIENT_KEY` |
 | `CLIENT_KEY` | — | Path to client TLS private key |
-| `CA_FILE` | — | Path to CA bundle for server certificate verification. Use this to reach an aggregator with a private-CA or self-signed certificate |
+| `CA_FILE` | — | Path to CA bundle for server certificate verification of the aggregator, the dds-proxy and the uPAs. Use this to reach a server with a private-CA or self-signed certificate |
+| `DDS_PROXY_URL` | — | Base URL of the [nsi-dds-proxy](https://github.com/workfloworchestrator/nsi-dds-proxy). Needed for `GET /providers/{nsaId}/reservations` |
+| `UPA_CLIENT_CERT` | — | Path to the aggregator's own client certificate, presented only to its uPAs by `GET /providers/{nsaId}/reservations` |
+| `UPA_CLIENT_KEY` | — | Path to the aggregator's private key for `UPA_CLIENT_CERT` |
 
 The aggregator's server certificate is **always verified**, independently of whether a client
 certificate is configured. There is no option to disable verification: point `CA_FILE` at the
 issuing CA to reach an aggregator whose certificate the system trust store does not recognise.
 
-All three paths are validated at startup. A path pointing at a missing file — a typo, or a Secret
+`DDS_PROXY_URL`, `UPA_CLIENT_CERT` and `UPA_CLIENT_KEY` must be set together or not at all;
+a partial set aborts startup.
+
+All certificate paths are validated at startup. A path pointing at a missing file — a typo, or a Secret
 that failed to mount — aborts startup rather than silently weakening the TLS configuration.
 | `NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
 | `DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
@@ -660,6 +666,42 @@ List all reservations. The proxy queries the aggregator to refresh all reservati
       "status": "ACTIVATED",
       "lastError": null,
       "segments": null
+    }
+  ]
+}
+```
+
+### GET /providers/{nsaId}/reservations
+
+Return every reservation held by one of the aggregator's uPAs, whatever its requester. The proxy
+sends the uPA an unfiltered `querySummarySync` as the aggregator: with the aggregator's NSA id and
+its client certificate (`UPA_CLIENT_CERT`), so the uPA needs no new trust relation. States are the
+uPA's raw NSI sub-states, not the simplified proxy status.
+
+Only a uPA that the aggregator's NSA document in the DDS lists in `peersWith`, and that advertises a
+provider URL, is queried; any other `nsaId` returns `404`. The proxy reads this from the
+nsi-dds-proxy at `DDS_PROXY_URL`. When these settings are not configured the endpoint returns
+`503`; an unreachable dds-proxy or uPA returns `502`.
+
+#### Response
+
+```json
+{
+  "providerNSA": "urn:ogf:network:example.domain:2025:nsa:supa",
+  "providerURL": "https://supa.example.domain/soap/connection/provider",
+  "reservations": [
+    {
+      "connectionId": "6e3f1a52-9c4d-4f8e-b7a1-2d5c8e9f0a13",
+      "globalReservationId": "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
+      "description": "example connection",
+      "requesterNSA": "urn:ogf:network:example.domain:2025:nsa:safnari",
+      "reservationState": "ReserveStart",
+      "provisionState": "Provisioned",
+      "lifecycleState": "Created",
+      "dataPlaneActive": true,
+      "capacity": 1000,
+      "sourceSTP": "urn:ogf:network:example.domain:2025:topology:port-1?vlan=2300",
+      "destSTP": "urn:ogf:network:example.domain:2025:topology:port-2?vlan=2300"
     }
   ]
 }

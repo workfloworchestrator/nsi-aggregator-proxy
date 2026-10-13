@@ -28,6 +28,7 @@ class NetworkServiceAgent(BaseModel):
 
     id: str
     provider_url: str | None
+    network_ids: list[str]
     roles: list[str]
     peers_with: list[str]
 
@@ -42,17 +43,11 @@ async def fetch_network_service_agents(client: httpx.AsyncClient, dds_proxy_url:
     return _AGENTS.validate_json(response.content)
 
 
-def peered_upa_url(agents: list[NetworkServiceAgent], aggregator_nsa: str, nsa_id: str) -> str | None:
-    """The provider URL of ``nsa_id`` if it is a uPA that the aggregator peers with, else None.
+def peered_upas(agents: list[NetworkServiceAgent], aggregator_nsa: str) -> list[NetworkServiceAgent]:
+    """The uPAs with a provider URL that the aggregator's own NSA document lists in ``peersWith``.
 
-    Only such a uPA is ever sent the aggregator's client certificate.
+    Only these are ever sent the aggregator's client certificate.
     """
-    by_id = {agent.id: agent for agent in agents}
-    match by_id.get(aggregator_nsa), by_id.get(nsa_id):
-        case (
-            NetworkServiceAgent(peers_with=peers),
-            NetworkServiceAgent(roles=roles, provider_url=str() as provider_url),
-        ) if nsa_id in peers and UPA_ROLE in roles and provider_url:
-            return provider_url
-        case _:
-            return None
+    aggregator = next((agent for agent in agents if agent.id == aggregator_nsa), None)
+    peers = set(aggregator.peers_with) if aggregator else set()
+    return [agent for agent in agents if agent.id in peers and UPA_ROLE in agent.roles and agent.provider_url]

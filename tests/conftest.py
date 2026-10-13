@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 # Set required environment variables before any application module is imported.
 os.environ.setdefault("PROVIDER_URL", "http://aggregator.test/nsi-v2/ConnectionServiceProvider")
@@ -307,7 +308,7 @@ def build_query_summary_sync_response_with_children(
     connection_id: str,
     correlation_id: str,
     children_xml: str,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> bytes:
     """Build a querySummarySyncConfirmed SOAP response with children in criteria."""
     return _build_confirmed_response("querySummarySyncConfirmed", connection_id, correlation_id, children_xml, **kwargs)
@@ -317,7 +318,7 @@ def build_query_recursive_confirmed_response(
     connection_id: str,
     correlation_id: str,
     children_xml: str,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> bytes:
     """Build a queryRecursiveConfirmed SOAP callback response with children."""
     return _build_confirmed_response("queryRecursiveConfirmed", connection_id, correlation_id, children_xml, **kwargs)

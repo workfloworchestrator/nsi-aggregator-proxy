@@ -25,7 +25,7 @@ from aggregator_proxy.mcp_server import build_mcp
 
 
 @pytest.fixture()
-def _mcp_disabled_auth(monkeypatch) -> None:
+def _mcp_disabled_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure auth flags are off so build_mcp can be constructed without OIDC config."""
     from aggregator_proxy.settings import settings
 
@@ -33,7 +33,7 @@ def _mcp_disabled_auth(monkeypatch) -> None:
     monkeypatch.setattr(settings, "mcp_auth_enabled", False)
 
 
-async def test_only_get_reservations_are_exposed(_mcp_disabled_auth) -> None:
+async def test_only_get_reservations_are_exposed(_mcp_disabled_auth: None) -> None:
     mcp = build_mcp(app)
     async with Client(mcp) as client:
         resources = await client.list_resources()

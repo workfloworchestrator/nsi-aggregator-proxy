@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 
 from aggregator_proxy.main import app
 
@@ -95,7 +96,7 @@ async def test_mcp_has_auth_provider_when_mcp_auth_enabled(monkeypatch: pytest.M
 
     mcp = mcp_server.build_mcp(app)
 
-    assert mcp.auth is not None
+    assert isinstance(mcp.auth, JWTVerifier)
     assert mcp.auth.jwks_uri == "https://idp.example.com/jwks"
     assert mcp.auth.issuer == "https://idp.example.com"
     assert mcp.auth.audience == "test-audience"

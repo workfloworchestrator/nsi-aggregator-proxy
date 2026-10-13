@@ -192,12 +192,12 @@ def test_mcp_auth_invariant(
     ],
 )
 def test_required_groups_parsing(env_value: str, expected: list[str]) -> None:
-    assert Settings(oidc_required_groups=env_value).oidc_required_groups == expected  # type: ignore[call-arg]
+    assert Settings(oidc_required_groups=env_value).oidc_required_groups == expected  # type: ignore[call-arg, arg-type]
 
 
 def test_malformed_json_groups_raises_validation_error() -> None:
     with pytest.raises(ValidationError, match="Invalid JSON"):
-        Settings(oidc_required_groups='["g1", invalid')  # type: ignore[call-arg]
+        Settings(oidc_required_groups='["g1", invalid')  # type: ignore[call-arg, arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -219,19 +219,19 @@ def existing_file(tmp_path: Path) -> Path:
 def test_certificate_path_rejects_missing_file(field: str, tmp_path: Path) -> None:
     """A configured certificate path pointing at a missing file aborts startup."""
     with pytest.raises(ValidationError, match="file not found"):
-        Settings(**{field: tmp_path / "does-not-exist.pem"})  # type: ignore[call-arg]
+        Settings(**{field: tmp_path / "does-not-exist.pem"})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("field", CERTIFICATE_FIELDS)
 def test_certificate_path_accepts_existing_file(field: str, existing_file: Path) -> None:
     """An existing file is accepted unchanged."""
-    assert getattr(Settings(**{field: existing_file}), field) == existing_file  # type: ignore[call-arg]
+    assert getattr(Settings(**{field: existing_file}), field) == existing_file  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("field", CERTIFICATE_FIELDS)
 def test_certificate_path_accepts_unset(field: str) -> None:
     """Leaving a certificate path unset stays valid."""
-    assert getattr(Settings(**{field: None}), field) is None  # type: ignore[call-arg]
+    assert getattr(Settings(**{field: None}), field) is None  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

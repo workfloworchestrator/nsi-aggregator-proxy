@@ -554,7 +554,7 @@ stateDiagram-v2
 
 ### DELETE /reservations/{connectionId}
 
-Terminate a connection. Allowed when the reservation is in the `RESERVED` or `FAILED` state, or in `RESERVING` when no reserve of this proxy is still waiting on it. The last case is a reserve stuck at the aggregator because a child never answered: the proxy has already reported `FAILED`, while the aggregator still reports it as reserving. Both successful termination and timeout result in the `TERMINATED` state. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating; any other state returns `409`.
+Terminate a connection. Allowed when the reservation is in the `RESERVED` or `FAILED` state, or in `RESERVING` when no reserve of this proxy is still waiting on it. The last case is a reserve stuck at the aggregator because a child never answered: the proxy has already reported `FAILED`, while the aggregator still reports it as reserving. A terminate is also accepted, in any state, while the aggregator's lifecycle state is still `Terminating` from an earlier terminate that did not complete, again only when no reserve of this proxy is waiting. Both successful termination and timeout result in the `TERMINATED` state. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating; any other state returns `409`.
 
 #### Request Body
 

@@ -1232,17 +1232,20 @@ async def terminate_reservation(
 ) -> JSONResponse:
     """Terminate the connection identified by ``connectionId``.
 
-    Allowed when the reservation is ``RESERVED`` or ``FAILED``, or ``RESERVING`` with no reserve of
-    this proxy still waiting on it.  On acceptance it transitions to ``TERMINATED``.  The final
+    Allowed when the reservation is ``RESERVED`` or ``FAILED``, or when no reserve of this proxy is
+    waiting on it and it is ``RESERVING`` or its aggregator lifecycle is ``Terminating`` (a retry).
+    On acceptance it transitions to ``TERMINATED``.  The final
     result is delivered to ``callbackURL``.
     """
     log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
     log.info("Terminate request received")
     log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
-    if reservation is None:
+    reservation, query = await _refresh_reservation(connectionId, nsi_client, store)
+    if reservation is None or query is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
+    # No proxy status means terminating, so the aggregator's lifecycle is read directly.
+    still_terminating = query.connection_states.lifecycle_state == "Terminating"
 
     # Idempotent on retry: dispatch on the refreshed status. Terminate has no distinct in-flight
     # state, so a duplicate while the first is mid-flight still re-sends (harmless: terminate is
@@ -1261,6 +1264,9 @@ async def terminate_reservation(
             # Stuck at the aggregator: a child never answered, and our reserve already reported
             # FAILED (or was lost on a restart). The aggregator accepts terminate while reserving.
             log.info("Terminating a reservation the aggregator still reports as reserving")
+        case _ if still_terminating and not store.is_reserve_in_flight(connectionId):
+            # An earlier terminate is stuck at the aggregator; it resends to the children still terminating.
+            log.info("Retrying terminate of a reservation the aggregator still reports as terminating")
         case _:
             # Rejected before the callbackURL is adopted, so a running reserve still delivers to its own.
             raise HTTPException(

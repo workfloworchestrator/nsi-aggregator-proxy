@@ -130,6 +130,12 @@ class TestTerminateValidation:
                 True,
                 id="reserving-with-our-reserve-in-flight",
             ),
+            pytest.param(
+                ReservationStatus.RESERVING,
+                {"reservation_state": "ReserveChecking", "lifecycle_state": "Terminating"},
+                True,
+                id="terminating-with-our-reserve-in-flight",
+            ),
         ],
     )
     def test_terminate_returns_409(
@@ -272,18 +278,28 @@ class TestTerminateSucceeds:
 
     @pytest.mark.anyio()
     @pytest.mark.parametrize(
-        ("status", "reservation_state"),
+        ("status", "handler_states"),
         [
-            pytest.param(ReservationStatus.RESERVED, "ReserveStart", id="reserved"),
-            pytest.param(ReservationStatus.FAILED, "ReserveTimeout", id="failed"),
+            pytest.param(ReservationStatus.RESERVED, {"reservation_state": "ReserveStart"}, id="reserved"),
+            pytest.param(ReservationStatus.FAILED, {"reservation_state": "ReserveTimeout"}, id="failed"),
             # A child never answered: our reserve reported FAILED, the aggregator still reserves.
-            pytest.param(ReservationStatus.FAILED, "ReserveChecking", id="reserving-without-our-reserve"),
+            pytest.param(
+                ReservationStatus.FAILED, {"reservation_state": "ReserveChecking"}, id="reserving-without-our-reserve"
+            ),
+            # An earlier terminate is stuck at the aggregator while the data plane is still up.
+            pytest.param(
+                ReservationStatus.ACTIVATED,
+                {"lifecycle_state": "Terminating", "provision_state": "Provisioned", "data_plane_active": True},
+                id="retry-while-terminating",
+            ),
         ],
     )
-    async def test_terminate(self, store: ReservationStore, status: ReservationStatus, reservation_state: str) -> None:
+    async def test_terminate(
+        self, store: ReservationStore, status: ReservationStatus, handler_states: dict[str, object]
+    ) -> None:
         store.create(_make_reservation(status=status))
 
-        handler = _make_nsi_handler(reservation_state=reservation_state)
+        handler = _make_nsi_handler(**handler_states)  # type: ignore[arg-type]
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as nsi_client:
             async with httpx.AsyncClient(transport=httpx.MockTransport(_callback_handler)) as cb_client:
                 app.state.nsi_client = nsi_client

@@ -201,6 +201,12 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
   runs, terminate still answers 409 and does not adopt its `callbackURL`, so the reserve result
   goes where it was asked. After a restart nothing is in flight, so a `RESERVING` reservation is
   terminable. Safnari accepts terminate while reserving once it has child connection ids.
+- **Terminate is retried while the aggregator lifecycle is `Terminating`**: the proxy status has no
+  terminating state, so a terminate stuck at the aggregator (a child that never confirmed) still
+  maps to, say, `ACTIVATED`, and was refused with 409. The match reads the raw lifecycle state from
+  the refresh and sends terminate again whatever the mapped status, unless a reserve of ours runs.
+  Safnari resends terminate to the children still terminating, and counts a child that answers it
+  holds nothing (00203, or 00201 with lifecycleState Terminated) as terminated.
 - **Every callback delivery retries on 409**: an orchestrator-core requester only reaches `AWAITING_CALLBACK` after its action step has returned and been committed, and answers 409 until then. A result that settles fast (terminating a FAILED reservation confirms in tens of milliseconds) or an idempotent re-delivery lands in that window, so `_send_callback` retries 409s (`_CALLBACK_ATTEMPTS` × `_CALLBACK_RETRY_DELAY_SECONDS`, about 12 s). It must always run in a background task: the idempotent paths spawn it so the 202 returns first, and the `_complete_*` tasks already are one. Do **not** await it inline in an endpoint.
 
 ### Testing

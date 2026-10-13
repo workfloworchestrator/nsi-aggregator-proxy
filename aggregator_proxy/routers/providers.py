@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GET /providers/{nsaId}/reservations: every reservation a uPA holds, asked as the aggregator."""
+"""The aggregator's uPAs: GET /providers lists them, GET /providers/{nsaId}/reservations asks one, as the aggregator."""
 
 import httpx
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from aggregator_proxy.dds_proxy import fetch_network_service_agents, peered_upa_url
-from aggregator_proxy.dependencies import NsiClient, UpaClient
-from aggregator_proxy.models import UpaReservation, UpaReservationsResponse
+from aggregator_proxy.dds_proxy import NetworkServiceAgent, fetch_network_service_agents, peered_upas
+from aggregator_proxy.dependencies import NsiClient, UpaClient, get_upa_client
+from aggregator_proxy.models import Upa, UpaReservation, UpaReservationsResponse, UpasResponse
 from aggregator_proxy.nsi_client import raise_for_status, soap_headers
 from aggregator_proxy.nsi_soap import NsiHeader, QueryReservation, build_query_summary_sync, parse_query_summary_sync
 from aggregator_proxy.settings import settings
@@ -47,8 +47,8 @@ def _to_upa_reservation(qr: QueryReservation) -> UpaReservation:
     )
 
 
-async def _provider_url(nsi_client: httpx.AsyncClient, nsa_id: str) -> str:
-    """The provider URL of ``nsa_id``, which must be a uPA the aggregator peers with."""
+async def _peered_upas(nsi_client: httpx.AsyncClient) -> list[NetworkServiceAgent]:
+    """The uPAs the aggregator peers with, per the DDS."""
     # The settings validator only allows the uPA certificate, which UpaClient requires, with DDS_PROXY_URL.
     assert settings.dds_proxy_url is not None
     try:
@@ -56,13 +56,36 @@ async def _provider_url(nsi_client: httpx.AsyncClient, nsa_id: str) -> str:
     except Exception as exc:
         logger.error("Failed to read network service agents from dds-proxy", error=str(exc))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to reach dds-proxy") from exc
-    provider_url = peered_upa_url(agents, settings.provider_nsa, nsa_id)
-    if provider_url is None:
+    return peered_upas(agents, settings.provider_nsa)
+
+
+async def _provider_url(nsi_client: httpx.AsyncClient, nsa_id: str) -> str:
+    """The provider URL of ``nsa_id``, which must be a uPA the aggregator peers with."""
+    upa = next((upa for upa in await _peered_upas(nsi_client) if upa.id == nsa_id), None)
+    if upa is None or upa.provider_url is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"{nsa_id} is not a uPA with a provider URL that {settings.provider_nsa} peers with",
         )
-    return provider_url
+    return upa.provider_url
+
+
+# UpaClient is only a guard here: listing needs no uPA certificate, but answers 503 like the query it serves.
+@router.get(
+    "",
+    response_model=UpasResponse,
+    operation_id="get_providers",
+    dependencies=[Depends(get_upa_client)],
+)
+async def get_providers(nsi_client: NsiClient) -> UpasResponse:
+    """Return the uPAs the aggregator peers with, which GET /providers/{nsaId}/reservations can query."""
+    return UpasResponse(
+        providers=[
+            Upa(nsaId=upa.id, providerURL=upa.provider_url, networkIds=upa.network_ids)
+            for upa in await _peered_upas(nsi_client)
+            if upa.provider_url
+        ]
+    )
 
 
 @router.get(

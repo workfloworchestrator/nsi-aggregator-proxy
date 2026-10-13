@@ -70,12 +70,12 @@ aggregator_proxy/
   nsi_client.py         # httpx.AsyncClient factories with mTLS config: create_nsi_client
                         #   (own certificate) and create_upa_client (the aggregator's certificate);
                         #   soap_headers / raise_for_status shared by every SOAP call
-  dds_proxy.py          # nsi-dds-proxy /network-service-agents lookup; peered_upa_url
+  dds_proxy.py          # nsi-dds-proxy /network-service-agents lookup; peered_upas
   dependencies.py       # FastAPI dependencies and the NsiClient / UpaClient aliases
   logging_config.py     # structlog + stdlib unified logging pipeline
   routers/
     reservations.py     # All /reservations endpoints (POST, GET, DELETE, provision, release)
-    providers.py        # GET /providers/{nsaId}/reservations — a uPA's full reservation list
+    providers.py        # GET /providers (the peered uPAs) and GET /providers/{nsaId}/reservations
     nsi_callback.py     # POST /nsi/v2/callback — receives async NSI callbacks
   nsi_soap/
     namespaces.py       # Shared NSMAP dict for all NSI CS v2 XML namespaces
@@ -127,7 +127,7 @@ emits a SOAP 1.1 Fault. Both are returned from `/nsi/v2/callback` as `text/xml; 
 
 **Detail query parameter**: `GET /reservations/{connectionId}` and `GET /reservations` accept a `detail` query parameter (`summary`, `full`, `recursive`) that controls path segment visibility. At `summary` (default) no segment data is returned. At `full`, the `querySummarySync` response's `<children>` elements are parsed into `segments[]` (order, connectionId, providerNSA, STPs, capacity) at no extra cost. At `recursive`, an async `queryRecursive` round-trip to the aggregator returns per-segment connection states mapped to proxy `status`. `detail=recursive` is rejected with 400 on the list endpoint because the async fan-out per reservation is too expensive. Segment data is transient (computed per request, not stored).
 
-**uPA reservations**: `GET /providers/{nsaId}/reservations` sends an unfiltered `querySummarySync` straight to one of the aggregator's uPAs and returns every reservation it holds, whatever the requester, with the raw NSI sub-states (not mapped to the proxy status). The nsi-orchestrator compares this against its own VLAN administration. The request carries the aggregator's NSA id as `requesterNSA` and is sent with the aggregator's client certificate (`UPA_CLIENT_CERT`/`UPA_CLIENT_KEY`), so the uPA needs no new trust relation. The target and its URL come from nsi-dds-proxy's `/network-service-agents`, fetched over `nsi_client` with the proxy's own certificate. `peered_upa_url` only returns the URL of a uPA that the aggregator's own NSA document lists in `peersWith`, so the aggregator's key is never presented to a URL a caller supplies. `DDS_PROXY_URL`, `UPA_CLIENT_CERT` and `UPA_CLIENT_KEY` are all or nothing: a settings validator aborts startup on a partial set, and with none of them the endpoint answers 503.
+**uPA reservations**: `GET /providers/{nsaId}/reservations` sends an unfiltered `querySummarySync` straight to one of the aggregator's uPAs and returns every reservation it holds, whatever the requester, with the raw NSI sub-states (not mapped to the proxy status). The nsi-orchestrator compares this against its own VLAN administration. The request carries the aggregator's NSA id as `requesterNSA` and is sent with the aggregator's client certificate (`UPA_CLIENT_CERT`/`UPA_CLIENT_KEY`), so the uPA needs no new trust relation. The target and its URL come from nsi-dds-proxy's `/network-service-agents`, fetched over `nsi_client` with the proxy's own certificate. `peered_upas` is the single rule for which uPAs may be queried: those with a provider URL that the aggregator's own NSA document lists in `peersWith`, so the aggregator's key is never presented to a URL a caller supplies. `GET /providers` returns that same list (NSA id, provider URL, network ids), so callers such as the nsi-orchestrator take their targets from it instead of re-deriving the rule; it answers 503 when unconfigured, like the query it serves. `DDS_PROXY_URL`, `UPA_CLIENT_CERT` and `UPA_CLIENT_KEY` are all or nothing: a settings validator aborts startup on a partial set, and with none of them the endpoint answers 503.
 
 The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-state machines to proxy states in priority order: Terminated/PassedEndTime → TERMINATED, Failed lifecycle → FAILED, ReserveTimeout/ReserveFailed/ReserveAborting → FAILED, has_error_event → FAILED, ReserveChecking/ReserveHeld/ReserveCommitting → RESERVING, Released + active → DEACTIVATING, dataPlane active → ACTIVATED, Provisioned → ACTIVATING, otherwise → RESERVED.
 

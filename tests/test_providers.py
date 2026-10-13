@@ -1,4 +1,4 @@
-"""Tests for GET /providers/{nsaId}/reservations."""
+"""Tests for GET /providers and GET /providers/{nsaId}/reservations."""
 
 from collections.abc import Sequence
 
@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from lxml import etree
 
-from aggregator_proxy.dds_proxy import UPA_ROLE, NetworkServiceAgent, peered_upa_url
+from aggregator_proxy.dds_proxy import UPA_ROLE, NetworkServiceAgent, peered_upas
 from aggregator_proxy.main import app
 from aggregator_proxy.nsi_soap import parse_correlation_id
 from aggregator_proxy.settings import settings
@@ -25,7 +25,7 @@ def _agent(nsa_id: str, provider_url: str | None, roles: list[str], peers_with: 
         "id": nsa_id,
         "name": nsa_id,
         "providerUrl": provider_url,
-        "networkIds": [],
+        "networkIds": [f"{nsa_id}:network"],
         "roles": roles,
         "peersWith": list(peers_with),
     }
@@ -140,37 +140,62 @@ def test_nsa_that_is_not_a_peered_upa_is_never_queried(client: TestClient, upa: 
     assert upa.requests == []
 
 
-def test_unconfigured_returns_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(app.state, "upa_client", None)
+def test_lists_only_the_peered_upas(client: TestClient) -> None:
+    resp = client.get("/providers")
 
-    assert client.get(f"/providers/{UPA_NSA}/reservations").status_code == 503
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "providers": [{"nsaId": UPA_NSA, "providerURL": UPA_URL, "networkIds": [f"{UPA_NSA}:network"]}]
+    }
 
 
 @pytest.mark.parametrize(
-    "client_attr",
-    [pytest.param("nsi_client", id="dds-proxy-down"), pytest.param("upa_client", id="upa-down")],
+    "path",
+    [pytest.param("/providers", id="list"), pytest.param(f"/providers/{UPA_NSA}/reservations", id="reservations")],
 )
-def test_unreachable_returns_502(client: TestClient, monkeypatch: pytest.MonkeyPatch, client_attr: str) -> None:
+def test_unconfigured_returns_503(client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    monkeypatch.setattr(app.state, "upa_client", None)
+
+    assert client.get(path).status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("client_attr", "path"),
+    [
+        pytest.param("nsi_client", "/providers", id="list-dds-proxy-down"),
+        pytest.param("nsi_client", f"/providers/{UPA_NSA}/reservations", id="reservations-dds-proxy-down"),
+        pytest.param("upa_client", f"/providers/{UPA_NSA}/reservations", id="reservations-upa-down"),
+    ],
+)
+def test_unreachable_returns_502(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, client_attr: str, path: str
+) -> None:
     monkeypatch.setattr(app.state, client_attr, httpx.AsyncClient(transport=httpx.MockTransport(_failing_handler)))
 
-    assert client.get(f"/providers/{UPA_NSA}/reservations").status_code == 502
+    assert client.get(path).status_code == 502
 
 
 @pytest.mark.parametrize(
     ("agents", "expected"),
     [
-        pytest.param(AGENTS, UPA_URL, id="peered-upa"),
-        pytest.param(AGENTS[1:], None, id="aggregator-not-in-dds"),
-        pytest.param([AGENTS[0], _agent(UPA_NSA, UPA_URL, [AGGREGATOR_ROLE])], None, id="peer-without-upa-role"),
-        pytest.param([AGENTS[0], _agent(UPA_NSA, None, [UPA_ROLE])], None, id="peer-without-provider-url"),
-        pytest.param([AGENTS[0], _agent(UPA_NSA, "", [UPA_ROLE])], None, id="peer-with-empty-provider-url"),
+        pytest.param(AGENTS, [UPA_NSA], id="peered-upa-only"),
+        pytest.param(AGENTS[1:], [], id="aggregator-not-in-dds"),
+        pytest.param([AGENTS[0], _agent(UPA_NSA, UPA_URL, [AGGREGATOR_ROLE])], [], id="peer-without-upa-role"),
+        pytest.param([AGENTS[0], _agent(UPA_NSA, None, [UPA_ROLE])], [], id="peer-without-provider-url"),
+        pytest.param([AGENTS[0], _agent(UPA_NSA, "", [UPA_ROLE])], [], id="peer-with-empty-provider-url"),
     ],
 )
-def test_peered_upa_url(agents: list[dict], expected: str | None) -> None:
+def test_peered_upas(agents: list[dict], expected: list[str]) -> None:
     parsed = [NetworkServiceAgent.model_validate(agent) for agent in agents]
-    assert peered_upa_url(parsed, settings.provider_nsa, UPA_NSA) == expected
+    assert [upa.id for upa in peered_upas(parsed, settings.provider_nsa)] == expected
 
 
-def test_route_has_explicit_operation_id() -> None:
-    operation = app.openapi()["paths"]["/providers/{nsaId}/reservations"]["get"]
-    assert operation["operationId"] == "get_provider_reservations"
+@pytest.mark.parametrize(
+    ("path", "operation_id"),
+    [
+        pytest.param("/providers", "get_providers", id="list"),
+        pytest.param("/providers/{nsaId}/reservations", "get_provider_reservations", id="reservations"),
+    ],
+)
+def test_routes_have_explicit_operation_ids(path: str, operation_id: str) -> None:
+    assert app.openapi()["paths"][path]["get"]["operationId"] == operation_id

@@ -225,6 +225,20 @@ class UpaReservation(BaseModel):
     destSTP: str | None = None
 
 
+class Upa(BaseModel):
+    """A uPA the aggregator peers with, as returned by GET /providers."""
+
+    nsaId: str
+    providerURL: str
+    networkIds: list[str]
+
+
+class UpasResponse(BaseModel):
+    """Response body for GET /providers: the uPAs the aggregator peers with."""
+
+    providers: list[Upa]
+
+
 class UpaReservationsResponse(BaseModel):
     """Response body for GET /providers/{nsaId}/reservations: every reservation the uPA holds."""
 

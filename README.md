@@ -671,6 +671,27 @@ List all reservations. The proxy queries the aggregator to refresh all reservati
 }
 ```
 
+### GET /providers
+
+List the uPAs the aggregator peers with: those its own NSA document in the DDS lists in `peersWith`
+and that advertise a provider URL. These are exactly the uPAs `GET /providers/{nsaId}/reservations`
+will query. Returns `503` when uPA queries are not configured and `502` when the dds-proxy is
+unreachable.
+
+#### Response
+
+```json
+{
+  "providers": [
+    {
+      "nsaId": "urn:ogf:network:example.domain:2025:nsa:supa",
+      "providerURL": "https://supa.example.domain/soap/connection/provider",
+      "networkIds": ["urn:ogf:network:example.domain:2025:topology"]
+    }
+  ]
+}
+```
+
 ### GET /providers/{nsaId}/reservations
 
 Return every reservation held by one of the aggregator's uPAs, whatever its requester. The proxy

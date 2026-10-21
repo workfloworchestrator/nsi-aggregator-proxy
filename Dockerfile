@@ -11,6 +11,8 @@ RUN uv build --no-cache --wheel --out-dir dist
 
 # Final stage
 FROM ghcr.io/astral-sh/uv:python3.13-alpine@sha256:e952f997ae794df0caf62bf814831d01b34e9141d1f3850d3cdc659c1790b18b
+# Drops emSign ECC Root CA - G3 (ca-certificates 20261020); remove once the base image has it.
+RUN apk upgrade --no-cache ca-certificates ca-certificates-bundle
 COPY --from=build /app/dist/*.whl /tmp/
 RUN uv pip install --system --no-cache /tmp/*.whl && rm /tmp/*.whl
 RUN addgroup -g 1000 aggregator_proxy && adduser -D -u 1000 -G aggregator_proxy aggregator_proxy

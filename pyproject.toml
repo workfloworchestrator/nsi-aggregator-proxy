@@ -14,7 +14,7 @@ maintainers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi[standard]==0.143.2",
+    "fastapi[standard]==0.143.3",
     "fastmcp==4.1.0",
     "httpx2==2.13.1",
     "lxml==6.1.3",

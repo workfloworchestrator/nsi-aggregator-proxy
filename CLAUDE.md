@@ -38,7 +38,7 @@ docker build --build-arg VERSION="$(uvx --from setuptools-scm python -m setuptoo
 
 ## Architecture
 
-This is a **FastAPI** application that exposes a simplified REST API on top of an NSI (Network Service Interface) aggregator (e.g. Safnari). Instead of the complex multi-state-machine NSI protocol, it presents a single simplified connection state machine with states: `RESERVING` → `RESERVED` → `ACTIVATING` → `ACTIVATED` → `DEACTIVATING` → back to `RESERVED`, plus `FAILED` and `TERMINATED`.
+This is a **FastAPI** application that exposes a simplified REST API on top of an NSI (Network Service Interface) aggregator (e.g. Safnari). Instead of the complex multi-state-machine NSI protocol, it presents a single simplified connection state machine with states: `RESERVING` → `RESERVED` → `ACTIVATING` → `ACTIVATED` → `DEACTIVATING` → back to `RESERVED`, plus `FAILED`, `TERMINATING` and `TERMINATED`.
 
 ### Key design points
 
@@ -108,7 +108,10 @@ emits a SOAP 1.1 Fault. Both are returned from `/nsi/v2/callback` as `text/xml; 
 | `Acknowledgment` | Sync | HTTP response to `provision`, `release`, `terminate` |
 | `ReserveConfirmed` | Async callback | Reserve held, proxy must send `reserveCommit` |
 | `ReserveFailed` | Async callback | State → FAILED; carries `ServiceException` (errorId + text per GFD.235) |
-| `ReserveTimeout` | Async callback | State → FAILED; reserve timed out before commit |
+| `ReserveTimeout` | Async notification | A child's hold expired. Acknowledged; a reserve whose wait runs out reads it back from `queryNotificationSync` as its reason |
+| `MessageDeliveryTimeout` | Async notification | The aggregator got no reply from a child. Acknowledged; a wait that runs out reads it back from `queryNotificationSync` as its reason |
+| `GenericError` | Async callback | `error`: an operation failed without a state transition; the header correlationId names it |
+| `UnsolicitedReply` | Async callback | `reserveAbortConfirmed` and the async `query*Confirmed`, answers to requests this proxy never sends; acknowledged and logged |
 | `ReserveCommitConfirmed` | Async callback | State → RESERVED |
 | `ReserveCommitFailed` | Async callback | State → FAILED; carries `ServiceException` |
 | `ProvisionConfirmed` | Async callback | Awaiting `dataPlaneStateChange` |
@@ -121,7 +124,7 @@ emits a SOAP 1.1 Fault. Both are returned from `/nsi/v2/callback` as `text/xml; 
 
 ### Current implementation status
 
-`POST /reservations`, `POST /reservations/{connectionId}/provision`, `POST /reservations/{connectionId}/release`, and `DELETE /reservations/{connectionId}` (terminate) are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. Release sends the NSI release request, waits for `releaseConfirmed`, then waits for `DataPlaneStateChange(active=False)` to transition back to RESERVED. In both, an `errorEvent` callback during the data-plane wait fails the operation at once with the event as `lastError`. Terminate sends the NSI terminate request, waits for `terminateConfirmed`, and transitions to TERMINATED (both success and timeout result in TERMINATED per the state machine).
+`POST /reservations`, `POST /reservations/{connectionId}/provision`, `POST /reservations/{connectionId}/release`, and `DELETE /reservations/{connectionId}` (terminate) are fully implemented. Reserve sends the NSI reserve request, waits for the async `reserveConfirmed` callback, sends `reserveCommit`, and delivers the final status via the caller's `callbackURL`. Provision sends the NSI provision request, waits for `provisionConfirmed`, then waits for `DataPlaneStateChange(active=True)` to transition to ACTIVATED. Release sends the NSI release request, waits for `releaseConfirmed`, then waits for `DataPlaneStateChange(active=False)` to transition back to RESERVED. In both, an `errorEvent` callback during the data-plane wait fails the operation at once with the event as `lastError`. Every wait also ends at once on an `error`; one that runs out names the latest `reserveTimeout` or `messageDeliveryTimeout` raised meanwhile as its reason. Terminate sends the NSI terminate request and waits for `terminateConfirmed`; an unconfirmed terminate is sent once more, and the result is TERMINATED only when the aggregator has terminated, otherwise its current status (normally TERMINATING).
 
 **Aggregator state refresh**: Before every operation (except `POST /reservations` which creates a new reservation), the proxy queries the aggregator via `querySummarySync` and maps the NSI sub-state machines to the proxy state, and concurrently calls `queryNotificationSync` (via `asyncio.gather()`) to detect error events (`activateFailed`, `deactivateFailed`, `dataplaneError`, `forcedEnd`) that are not visible in the sub-state machines. This ensures the proxy's state reflects changes made outside the proxy (e.g. PassedEndTime, other NSI clients, error events). On startup, a full `querySummarySync` populates the store. The `requesterNSA` for query requests comes from `settings.requester_nsa`; for operation requests (reserve, commit, provision, release, terminate) it comes from the user-supplied `requesterNSA`. The `providerNSA` from `POST /reservations` is validated against `settings.provider_nsa` and rejected with 400 if they don't match.
 
@@ -129,7 +132,7 @@ emits a SOAP 1.1 Fault. Both are returned from `/nsi/v2/callback` as `text/xml; 
 
 **uPA reservations**: `GET /providers/{nsaId}/reservations` sends an unfiltered `querySummarySync` straight to one of the aggregator's uPAs and returns every reservation it holds, whatever the requester, with the raw NSI sub-states (not mapped to the proxy status). The nsi-orchestrator compares this against its own VLAN administration. The request carries the aggregator's NSA id as `requesterNSA` and is sent with the aggregator's client certificate (`UPA_CLIENT_CERT`/`UPA_CLIENT_KEY`), so the uPA needs no new trust relation. The target and its URL come from nsi-dds-proxy's `/network-service-agents`, fetched over `nsi_client` with the proxy's own certificate. `peered_upas` is the single rule for which uPAs may be queried: those with a provider URL that the aggregator's own NSA document lists in `peersWith`, so the aggregator's key is never presented to a URL a caller supplies. `GET /providers` returns that same list (NSA id, provider URL, network ids), so callers such as the nsi-orchestrator take their targets from it instead of re-deriving the rule; it answers 503 when unconfigured, like the query it serves. `DDS_PROXY_URL`, `UPA_CLIENT_CERT` and `UPA_CLIENT_KEY` are all or nothing: a settings validator aborts startup on a partial set, and with none of them the endpoint answers 503.
 
-The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-state machines to proxy states in priority order: Terminated/PassedEndTime → TERMINATED, Failed lifecycle → FAILED, ReserveTimeout/ReserveFailed/ReserveAborting → FAILED, has_error_event → FAILED, ReserveChecking/ReserveHeld/ReserveCommitting → RESERVING, Released + active → DEACTIVATING, dataPlane active → ACTIVATED, Provisioned → ACTIVATING, otherwise → RESERVED.
+The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-state machines to proxy states in priority order: Terminated/PassedEndTime → TERMINATED, Terminating → TERMINATING, Failed lifecycle → FAILED, ReserveTimeout/ReserveFailed/ReserveAborting → FAILED, has_error_event → FAILED, ReserveChecking/ReserveHeld/ReserveCommitting → RESERVING, Released + active → DEACTIVATING, dataPlane active → ACTIVATED, Provisioned → ACTIVATING, otherwise → RESERVED. `derive_status` then refines the transient ones from durable history: RESERVING with a `reserveTimeout` or `messageDeliveryTimeout` notification → FAILED (Safnari keeps the reservation pending forever after either), and the stuck-data-plane rules for ACTIVATING/DEACTIVATING.
 
 ### Configuration reference
 
@@ -145,7 +148,7 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 | `DDS_PROXY_URL` | No | None | Base URL of the nsi-dds-proxy, queried for the uPAs the aggregator peers with by `GET /providers/{nsaId}/reservations`. Set together with `UPA_CLIENT_CERT` and `UPA_CLIENT_KEY` or not at all |
 | `UPA_CLIENT_CERT` | No | None | Path to the aggregator's own client certificate, presented only to its uPAs on `GET /providers/{nsaId}/reservations`. Validated at startup |
 | `UPA_CLIENT_KEY` | No | None | Path to the aggregator's private key for `UPA_CLIENT_CERT`. Validated at startup |
-| `NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `NSI_TIMEOUT` | No | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate). Must stay above Safnari's `safnari.async.reply.timeout` (120 s), so its `messageDeliveryTimeout` is raised before the wait runs out and becomes the reason |
 | `DATAPLANE_TIMEOUT` | No | `300` | Seconds to wait for `DataPlaneStateChange(active=True)` after provision |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 | `HOST` | No | `0.0.0.0` | Bind host |
@@ -196,17 +199,44 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 - **Terminate accepts `RESERVING` only when no reserve task of ours is running**: a reserve whose
   child never answers stays `ReserveChecking` at the aggregator, so the refreshed status is
   `RESERVING`, while our reserve task has already timed out and reported `FAILED`. Refusing it left
-  the requester no way to clean up. `ReservationStore` tracks running reserve tasks
-  (`reserve_started` before the task is spawned, `reserve_finished` in its `finally`). While one
-  runs, terminate still answers 409 and does not adopt its `callbackURL`, so the reserve result
-  goes where it was asked. After a restart nothing is in flight, so a `RESERVING` reservation is
-  terminable. Safnari accepts terminate while reserving once it has child connection ids.
-- **Terminate is retried while the aggregator lifecycle is `Terminating`**: the proxy status has no
-  terminating state, so a terminate stuck at the aggregator (a child that never confirmed) still
-  maps to, say, `ACTIVATED`, and was refused with 409. The match reads the raw lifecycle state from
-  the refresh and sends terminate again whatever the mapped status, unless a reserve of ours runs.
-  Safnari resends terminate to the children still terminating, and counts a child that answers it
-  holds nothing (00203, or 00201 with lifecycleState Terminated) as terminated.
+  the requester no way to clean up. `ReservationStore` tracks running reserve and terminate tasks
+  (`task_started(Operation.…, id)` before the task is spawned, `task_finished` in its `finally`).
+  While a reserve runs, terminate answers 409 and does not adopt its `callbackURL`, so the reserve
+  result goes where it was asked; only a connection the aggregator already terminated is re-delivered
+  to the terminate's `callbackURL`. After a restart nothing is in flight, so a `RESERVING`
+  reservation is terminable. Safnari accepts terminate while reserving once it has child connection
+  ids. A retried reserve never reuses a TERMINATING or TERMINATED reservation.
+- **TERMINATED means the aggregator terminated**: before TERMINATING existed, a terminate that
+  timed out was reported TERMINATED, so a requester could close a connection the aggregator still
+  held (a child whose terminateConfirmed never reached the aggregator). `_complete_terminate`
+  reports TERMINATED only on `terminateConfirmed` or a refreshed lifecycle of Terminated. An
+  unconfirmed terminate is sent once more, unless the aggregator terminated meanwhile (a refresh that
+  fails, or answers something unparseable, counts as not terminated), then the refreshed status is
+  reported (normally TERMINATING, also when the refresh fails), with the reason in `lastError`.
+- **The one re-send settles a lost child confirmation**: Safnari resends terminate only to the
+  children still terminating, and counts a child that refuses it because it holds nothing (00203,
+  or 00201 with lifecycleState Terminated, matched case-insensitively; SuPA sends `TERMINATED`) as
+  terminated. SuPA refuses synchronously, on the same HTTP exchange, so this works even while the
+  child's own callbacks to Safnari are broken. Safnari up to 3.3.1 fails an assert when a late reply
+  to the first terminate arrives after the re-send; fixed in nsi-safnari `e529aa5`.
+- **Terminate is retried in TERMINATING, but never twice at once**: the match accepts `TERMINATING`
+  and `RESERVING`. While a terminate of ours runs another one is not sent: it answers 202, and its
+  `callbackURL`, if any, is added to `Reservation.extra_callback_urls`, so the running terminate's
+  result goes to every caller. Otherwise a retry would steal the first one's callback and double the
+  resends. `callbackURL` is optional on terminate, so a caller can re-send one without an open
+  callback and read the result, `lastError` included, with GET: a refreshed TERMINATING carries the
+  latest messageDeliveryTimeout, also after a restart.
+- **`reserveTimeout` and `messageDeliveryTimeout` end no wait**: Safnari sends both with a new
+  correlationId of its own (`messageDeliveryTimeout`'s body carries the child request's), in either
+  order, and a reserve's pair can arrive after a later operation was sent. Nothing ties one to a
+  particular operation reliably, so the callback endpoint only acknowledges and logs them. A wait that
+  runs out (`_await_reply`) reads them back from queryNotificationSync and reports the latest raised
+  since it began (`_CLOCK_SKEW` allows for the aggregator's clock) as its reason. A failure is so
+  reported after `NSI_TIMEOUT` rather than Safnari's 120 s; ending waits early needed routing rules
+  that could still credit an earlier operation's notification to a later one.
+- **Every requester operation in the WSDL is dispatched**: `test_every_requester_operation_is_dispatched`
+  reads `docs/schemas/ogf_nsi_connection_requester_v2_0.wsdl`; an operation that falls through to
+  "Unknown NSI operation" is answered with a 400 and lost.
 - **Every callback delivery retries on 409**: an orchestrator-core requester only reaches `AWAITING_CALLBACK` after its action step has returned and been committed, and answers 409 until then. A result that settles fast (terminating a FAILED reservation confirms in tens of milliseconds) or an idempotent re-delivery lands in that window, so `_send_callback` retries 409s (`_CALLBACK_ATTEMPTS` × `_CALLBACK_RETRY_DELAY_SECONDS`, about 12 s). It must always run in a background task: the idempotent paths spawn it so the 202 returns first, and the `_complete_*` tasks already are one. Do **not** await it inline in an endpoint.
 
 ### Testing
@@ -216,6 +246,7 @@ Tests use `pytest-asyncio` in `auto` mode (all async test functions run automati
 - `build_query_summary_sync_response(connection_id, correlation_id, ...)` — SOAP `querySummarySyncConfirmed` response
 - `build_query_notification_sync_response(correlation_id, *error_events)` — SOAP `queryNotificationSyncConfirmed` response
 - `build_error_event_xml(...)` — `<errorEvent>` XML fragment
+- `build_reserve_timeout_xml(...)` / `build_message_delivery_timeout_xml(...)` — notification fragments for `queryNotificationSyncConfirmed`
 - `build_child_xml(...)` / `build_connection_states_xml(...)` — child segment XML fragments
 - `build_query_summary_sync_response_with_children(...)` / `build_query_recursive_confirmed_response(...)` — responses with path children
 - `build_soap_envelope(body_xml, correlation_id)` — wraps any body XML in a full SOAP envelope
@@ -223,6 +254,12 @@ Tests use `pytest-asyncio` in `auto` mode (all async test functions run automati
 - `get_pending_correlation_id(store)` — extract the single pending correlationId from a store (asserts exactly one)
 - `make_reservation(...)` — build a `Reservation` with sensible defaults
 - `store` fixture — fresh `ReservationStore` per test
+
+`tests/fixtures/safnari_child_never_replies.json` holds the messages Safnari sends a requester when a
+child acknowledges requests but never replies, for reserves with and without a later terminate and
+in both notification orders, in Safnari's exact format with synthetic NSA ids, connection ids and
+timestamps. `test_replay_child_never_replies.py` replays them. This repo is public: keep every
+fixture synthetic.
 
 ### Local env file
 

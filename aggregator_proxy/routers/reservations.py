@@ -17,6 +17,7 @@
 
 import asyncio
 import contextlib
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from itertools import chain
 from typing import Annotated
@@ -24,7 +25,7 @@ from uuid import uuid4
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 
 from aggregator_proxy.dependencies import NsiClient, get_callback_client, get_reservation_store
@@ -39,6 +40,7 @@ from aggregator_proxy.models import (
     ReservationRequest,
     ReservationsListResponse,
     ReservationStatus,
+    TerminateRequest,
 )
 from aggregator_proxy.nsi_client import raise_for_status, soap_headers
 from aggregator_proxy.nsi_soap import (
@@ -46,6 +48,8 @@ from aggregator_proxy.nsi_soap import (
     ChildSegment,
     DataPlaneStateChange,
     ErrorEvent,
+    GenericError,
+    MessageDeliveryTimeout,
     Notifications,
     NsiHeader,
     NsiMessage,
@@ -78,10 +82,10 @@ from aggregator_proxy.nsi_soap import (
     parse_query_result_sync,
     parse_query_summary_sync,
 )
-from aggregator_proxy.reservation_store import Reservation, ReservationStore
+from aggregator_proxy.reservation_store import Operation, Reservation, ReservationStore
 from aggregator_proxy.routers.nsi_callback import NSI_CALLBACK_PATH
 from aggregator_proxy.settings import settings
-from aggregator_proxy.state_mapping import DerivedStatus, derive_status, map_nsi_states_to_status
+from aggregator_proxy.state_mapping import DerivedStatus, derive_status, map_nsi_states_to_status, parse_iso8601
 
 logger = structlog.get_logger(__name__)
 
@@ -149,6 +153,9 @@ async def _send_callback(
     reservation: Reservation,
 ) -> None:
     """POST reservation detail to the caller's callbackURL, retrying while the caller answers 409."""
+    if not callback_url:
+        logger.info("No callbackURL, result not delivered", connection_id=reservation.connection_id)
+        return
     payload = _build_reservation_detail(reservation).model_dump()
     log = logger.bind(connection_id=reservation.connection_id, status=reservation.status, callback_url=callback_url)
     log.info("Delivering callback")
@@ -233,17 +240,45 @@ def _format_last_error(error_events: list[ErrorEvent]) -> str | None:
     return _format_error_event(max(error_events, key=lambda e: e.notification_id))
 
 
+def _failure_reason(msg: NsiMessage | str) -> str:
+    """Describe a reply that ends an operation without confirming it, or pass through why none came."""
+    match msg:
+        case str():
+            return msg
+        case ReserveFailed(service_exception=exc):
+            return f"reserveFailed: {_format_service_exception(exc)}"
+        case ReserveCommitFailed(service_exception=exc):
+            return f"reserveCommitFailed: {_format_service_exception(exc)}"
+        case GenericError(service_exception=exc):
+            return f"error: {_format_service_exception(exc)}"
+        case ReserveTimeout():
+            return (
+                f"reserveTimeout: {msg.originating_nsa} released its hold on "
+                f"{msg.originating_connection_id} after {msg.timeout_value}s"
+            )
+        case MessageDeliveryTimeout():
+            return f"messageDeliveryTimeout: a child NSA did not reply to aggregator request {msg.correlation_id}"
+        case _:
+            return f"unexpected message: {type(msg).__name__}"
+
+
+def _format_last_timeout(timeouts: Sequence[ReserveTimeout | MessageDeliveryTimeout]) -> str | None:
+    """Describe the most recent of these timeout notifications, if any."""
+    return _failure_reason(max(timeouts, key=lambda t: t.notification_id)) if timeouts else None
+
+
 def _resolve_last_error(
     derived: DerivedStatus, nsi_last_error: str | None, existing_last_error: str | None
 ) -> str | None:
     """Decide the last_error to store, tied to the derived status.
 
     An NSI errorEvent always wins. Otherwise a FAILED status carries the deriver's synthetic reason
-    (or keeps the prior message if there is none), and any non-FAILED status clears it.
+    (or keeps the prior message if there is none), TERMINATING keeps why the terminate was not
+    confirmed, and any other status clears it.
     """
     if nsi_last_error is not None:
         return nsi_last_error
-    if derived.status == ReservationStatus.FAILED:
+    if derived.status in (ReservationStatus.FAILED, ReservationStatus.TERMINATING):
         return derived.reason if derived.reason is not None else existing_last_error
     return None
 
@@ -368,6 +403,36 @@ async def _query_notifications(
         return empty
 
 
+# Margin for the aggregator's clock, which timestamps a timeout notification when it raises it.
+_CLOCK_SKEW = timedelta(minutes=1)
+
+
+async def _await_reply(
+    future: asyncio.Future[NsiMessage], connection_id: str, nsi_client: httpx.AsyncClient, expected: str
+) -> NsiMessage | str:
+    """Wait ``NSI_TIMEOUT`` for an operation's reply; on timeout, return why it did not come.
+
+    The reason is the latest reserveTimeout or messageDeliveryTimeout the aggregator raised since the
+    wait began. Those carry the aggregator's own correlationId, so they are read back here instead of
+    ending the wait, where one belonging to an earlier operation could be taken for this one's.
+    """
+    started = datetime.now(timezone.utc)
+    try:
+        return await asyncio.wait_for(future, timeout=settings.nsi_timeout)
+    except asyncio.TimeoutError:
+        notifications = await _query_notifications(nsi_client, connection_id)
+        timeouts: list[ReserveTimeout | MessageDeliveryTimeout] = [
+            *notifications.reserve_timeouts,
+            *notifications.delivery_timeouts,
+        ]
+        raised_since = [
+            timeout
+            for timeout in timeouts
+            if (raised := parse_iso8601(timeout.timestamp)) is not None and raised >= started - _CLOCK_SKEW
+        ]
+        return _format_last_timeout(raised_since) or f"no {expected} received within timeout"
+
+
 async def _query_results(
     nsi_client: httpx.AsyncClient,
     connection_id: str,
@@ -417,6 +482,8 @@ async def _resolve_and_store(
         start_time=qr.start_time,
         now=datetime.now(timezone.utc),
         dataplane_timeout=timedelta(seconds=settings.dataplane_timeout),
+        reserve_failure=_format_last_timeout([*notifications.reserve_timeouts, *notifications.delivery_timeouts]),
+        terminate_failure=_format_last_timeout(notifications.delivery_timeouts),
     )
     return _update_store_from_query(store, qr, derived, notifications.error_events)
 
@@ -579,7 +646,7 @@ async def _find_reservation_by_global_id(
     nsi_client: httpx.AsyncClient,
     store: ReservationStore,
 ) -> Reservation | None:
-    """Return the live (non-terminated) reservation the aggregator holds for this globalReservationId.
+    """Return the live (not terminating or terminated) reservation the aggregator holds for this globalReservationId.
 
     The aggregator is the source of truth, so this makes reserve idempotency survive a proxy restart
     (which loses the in-memory store and is itself a likely cause of the lost callback being retried).
@@ -604,7 +671,9 @@ async def _find_reservation_by_global_id(
         qr for qr in parse_query_summary_sync(response.content) if qr.global_reservation_id == global_reservation_id
     ]
     resolved = await asyncio.gather(*(_finalize_refresh(qr, nsi_client, store) for qr in candidates))
-    return next((r for r, _ in resolved if r.status is not ReservationStatus.TERMINATED), None)
+    # A terminating reservation is on its way out: reusing it would hand the terminate's result to the reserve.
+    gone = (ReservationStatus.TERMINATING, ReservationStatus.TERMINATED)
+    return next((r for r, _ in resolved if r.status not in gone), None)
 
 
 async def _complete_reserve(
@@ -616,9 +685,8 @@ async def _complete_reserve(
 ) -> None:
     """Background task: drive the reservation to RESERVED or FAILED.
 
-    Phase 1 — wait for reserveConfirmed / reserveFailed / reserveTimeout.
-    Phase 2 — send reserveCommit, wait for reserveCommitConfirmed /
-               reserveCommitFailed.
+    Phase 1 — wait for reserveConfirmed / reserveFailed.
+    Phase 2 — send reserveCommit, wait for reserveCommitConfirmed / reserveCommitFailed.
     On any failure the state is set to FAILED and the callback is delivered.
     """
     log = logger.bind(connection_id=connection_id)
@@ -633,24 +701,12 @@ async def _complete_reserve(
 
     try:
         # --- Phase 1: wait for reserveConfirmed / failure ---
-        try:
-            msg = await asyncio.wait_for(reserve_future, timeout=settings.nsi_timeout)
-        except asyncio.TimeoutError:
-            await fail("no reserveConfirmed received within timeout")
-            return
-
-        match msg:
-            case ReserveFailed():
-                await fail(f"reserveFailed: {_format_service_exception(msg.service_exception)}")
-                return
-            case ReserveTimeout():
-                await fail("reserveTimeout from aggregator")
-                return
-            case ReserveConfirmed():
-                store.update_criteria(connection_id, msg)
+        match await _await_reply(reserve_future, connection_id, nsi_client, "reserveConfirmed"):
+            case ReserveConfirmed() as confirmed:
+                store.update_criteria(connection_id, confirmed)
                 log.info("Reserve confirmed by aggregator")
-            case _:
-                await fail(f"unexpected message: {type(msg).__name__}")
+            case reply:
+                await fail(_failure_reason(reply))
                 return
 
         # --- Phase 2: send reserveCommit, wait for commit result ---
@@ -676,21 +732,10 @@ async def _complete_reserve(
         log.debug("Inbound SOAP reserveCommit response", xml=response.text)
         log.info("ReserveCommit accepted by aggregator, waiting for commit confirmation")
 
-        try:
-            commit_msg = await asyncio.wait_for(commit_future, timeout=settings.nsi_timeout)
-        except asyncio.TimeoutError:
-            await fail("no reserveCommitConfirmed received within timeout")
+        commit_reply = await _await_reply(commit_future, connection_id, nsi_client, "reserveCommitConfirmed")
+        if not isinstance(commit_reply, ReserveCommitConfirmed):
+            await fail(_failure_reason(commit_reply))
             return
-
-        match commit_msg:
-            case ReserveCommitFailed():
-                await fail(f"reserveCommitFailed: {_format_service_exception(commit_msg.service_exception)}")
-                return
-            case ReserveCommitConfirmed():
-                pass
-            case _:
-                await fail(f"unexpected message: {type(commit_msg).__name__}")
-                return
         store.update_status(connection_id, ReservationStatus.RESERVED)
         reservation = store.get(connection_id)
         if reservation is not None:
@@ -703,7 +748,7 @@ async def _complete_reserve(
         with contextlib.suppress(Exception):
             await fail("internal error")
     finally:
-        store.reserve_finished(connection_id)
+        store.task_finished(Operation.RESERVE, connection_id)
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +881,7 @@ async def create_reservation(
         )
     )
 
-    store.reserve_started(connection_id)
+    store.task_started(Operation.RESERVE, connection_id)
     asyncio.create_task(
         _complete_reserve(connection_id, reserve_future, nsi_client, callback_client, store),
         name=f"reserve-{connection_id}",
@@ -921,18 +966,11 @@ async def _complete_provision(
 
     try:
         # --- Phase 1: wait for provisionConfirmed ---
-        try:
-            msg = await asyncio.wait_for(provision_future, timeout=settings.nsi_timeout)
-        except asyncio.TimeoutError:
-            await fail("no provisionConfirmed received within timeout")
+        reply = await _await_reply(provision_future, connection_id, nsi_client, "provisionConfirmed")
+        if not isinstance(reply, ProvisionConfirmed):
+            await fail(_failure_reason(reply))
             return
-
-        match msg:
-            case ProvisionConfirmed():
-                log.info("Provision confirmed by aggregator, waiting for data plane activation")
-            case _:
-                await fail(f"unexpected message: {type(msg).__name__}")
-                return
+        log.info("Provision confirmed by aggregator, waiting for data plane activation")
 
         # --- Phase 2: wait for DataPlaneStateChange(active=True) ---
         if (reason := await _dataplane_failure(connection_id, True, nsi_client, store)) is not None:
@@ -1060,18 +1098,11 @@ async def _complete_release(
 
     try:
         # --- Phase 1: wait for releaseConfirmed ---
-        try:
-            msg = await asyncio.wait_for(release_future, timeout=settings.nsi_timeout)
-        except asyncio.TimeoutError:
-            await fail("no releaseConfirmed received within timeout")
+        reply = await _await_reply(release_future, connection_id, nsi_client, "releaseConfirmed")
+        if not isinstance(reply, ReleaseConfirmed):
+            await fail(_failure_reason(reply))
             return
-
-        match msg:
-            case ReleaseConfirmed():
-                log.info("Release confirmed by aggregator, waiting for data plane deactivation")
-            case _:
-                await fail(f"unexpected message: {type(msg).__name__}")
-                return
+        log.info("Release confirmed by aggregator, waiting for data plane deactivation")
 
         # --- Phase 2: wait for DataPlaneStateChange(active=False) ---
         if (reason := await _dataplane_failure(connection_id, False, nsi_client, store)) is not None:
@@ -1177,44 +1208,107 @@ async def release_reservation(
     return _accepted(connectionId)
 
 
+async def _send_terminate(
+    connection_id: str,
+    requester_nsa: str,
+    nsi_client: httpx.AsyncClient,
+    store: ReservationStore,
+) -> asyncio.Future[NsiMessage]:
+    """Send terminate to the aggregator and return the future its reply resolves.
+
+    Raises:
+        HTTPException: 502 when the aggregator cannot be reached or does not acknowledge the terminate.
+    """
+    log = logger.bind(connection_id=connection_id)
+    correlation_id = f"urn:uuid:{uuid4()}"
+    terminate_future = store.register_pending(correlation_id)
+
+    header = _operation_header(requester_nsa, correlation_id)
+    soap_bytes = build_terminate(header, connection_id)
+    log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
+    log.info("Sending terminate request to aggregator")
+
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("terminate"))
+        raise_for_status(response, "terminate", connection_id=connection_id)
+    except Exception as exc:
+        store.cancel_pending(correlation_id)
+        log.error("Failed to send terminate request to aggregator", error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+
+    log.debug("Inbound SOAP terminate response", xml=response.text)
+    sync_msg = parse(response.content)
+    if not isinstance(sync_msg, Acknowledgment):
+        store.cancel_pending(correlation_id)
+        raise HTTPException(status_code=502, detail=_sync_failure_detail(sync_msg))
+    log.info("Terminate accepted by aggregator, waiting for confirmation")
+    return terminate_future
+
+
 async def _complete_terminate(
     connection_id: str,
+    requester_nsa: str,
     terminate_future: asyncio.Future[NsiMessage],
+    nsi_client: httpx.AsyncClient,
     callback_client: httpx.AsyncClient,
     store: ReservationStore,
 ) -> None:
-    """Background task: drive the reservation to TERMINATED.
+    """Background task: send an unconfirmed terminate once more; report TERMINATED only once the aggregator has.
 
-    Wait for TerminateConfirmed (timeout: nsi_timeout).
-    Both success and failure end in TERMINATED per the state machine.
+    Otherwise the result is the aggregator's refreshed status, or TERMINATING when it cannot be read.
     """
     log = logger.bind(connection_id=connection_id)
 
-    async def terminated(reason: str) -> None:
-        store.update_status(connection_id, ReservationStatus.TERMINATED)
+    async def report(status: ReservationStatus, reason: str | None) -> None:
+        store.update_status(connection_id, status)
         reservation = store.get(connection_id)
         if reservation is not None:
-            await _send_callback(callback_client, reservation.callback_url, reservation)
-        log.info("Terminate completed", reason=reason)
+            reservation.last_error = reason
+            urls = dict.fromkeys([reservation.callback_url, *reservation.extra_callback_urls])
+            reservation.extra_callback_urls = []
+            await asyncio.gather(*(_send_callback(callback_client, url, reservation) for url in urls))
+        log.info("Terminate finished", status=status, reason=reason)
+
+    async def aggregator_status() -> ReservationStatus | None:
+        """The refreshed status, or None when the aggregator cannot tell (unreachable, bad reply, unknown)."""
+        try:
+            reservation, _ = await _refresh_reservation(connection_id, nsi_client, store)
+        except Exception as exc:
+            log.warning("Could not refresh the reservation", error=str(exc))
+            return None
+        return reservation.status if reservation is not None else None
+
+    async def failure(future: asyncio.Future[NsiMessage]) -> str | None:
+        """Why the terminate was not confirmed, or None if it was."""
+        reply = await _await_reply(future, connection_id, nsi_client, "terminateConfirmed")
+        return None if isinstance(reply, TerminateConfirmed) else _failure_reason(reply)
+
+    async def resend() -> str | None:
+        try:
+            future = await _send_terminate(connection_id, requester_nsa, nsi_client, store)
+        except HTTPException as exc:
+            return f"resending terminate failed: {exc.detail}"
+        return await failure(future)
+
+    async def outcome() -> tuple[ReservationStatus, str | None]:
+        reason = await failure(terminate_future)
+        status_now = None if reason is None else await aggregator_status()
+        if reason is not None and status_now is not ReservationStatus.TERMINATED:
+            log.info("Terminate not confirmed, sending it once more", reason=reason)
+            reason = await resend()
+            status_now = None if reason is None else await aggregator_status()
+        if reason is None or status_now is ReservationStatus.TERMINATED:
+            return ReservationStatus.TERMINATED, None
+        return status_now or ReservationStatus.TERMINATING, reason
 
     try:
-        try:
-            msg = await asyncio.wait_for(terminate_future, timeout=settings.nsi_timeout)
-        except asyncio.TimeoutError:
-            await terminated("no terminateConfirmed received within timeout")
-            return
-
-        match msg:
-            case TerminateConfirmed():
-                await terminated("terminateConfirmed received")
-            case _:
-                await terminated(f"unexpected message: {type(msg).__name__}")
-                return
-
-    except Exception:
+        await report(*await outcome())
+    except Exception as exc:
         log.exception("Unexpected error in _complete_terminate")
         with contextlib.suppress(Exception):
-            await terminated("internal error")
+            await report(ReservationStatus.TERMINATING, f"terminate not confirmed: {exc}")
+    finally:
+        store.task_finished(Operation.TERMINATE, connection_id)
 
 
 @router.delete(
@@ -1225,88 +1319,68 @@ async def _complete_terminate(
 )
 async def terminate_reservation(
     connectionId: str,
-    body: CallbackRequest,
     nsi_client: NsiClient,
     callback_client: CallbackClient,
     store: Store,
+    body: Annotated[TerminateRequest | None, Body()] = None,
 ) -> JSONResponse:
     """Terminate the connection identified by ``connectionId``.
 
-    Allowed when the reservation is ``RESERVED`` or ``FAILED``, or when no reserve of this proxy is
-    waiting on it and it is ``RESERVING`` or its aggregator lifecycle is ``Terminating`` (a retry).
-    On acceptance it transitions to ``TERMINATED``.  The final
-    result is delivered to ``callbackURL``.
+    Allowed when the reservation is ``RESERVED``, ``FAILED``, ``RESERVING`` (a reserve stuck at the
+    aggregator) or ``TERMINATING`` (a retry), and no reserve of this proxy is waiting on it. The
+    result, ``TERMINATED`` once the aggregator has terminated and otherwise its current status, is
+    delivered to ``callbackURL``; a terminate without one is not reported. While a terminate of this
+    proxy runs, another is not sent: the result goes to every callbackURL given meanwhile as well.
     """
-    log = logger.bind(connection_id=connectionId, callback_url=str(body.callbackURL))
+    callback_url = str(body.callbackURL) if body is not None and body.callbackURL is not None else ""
+    log = logger.bind(connection_id=connectionId, callback_url=callback_url)
     log.info("Terminate request received")
-    log.debug("JSON request body", json=body.model_dump(mode="json"))
 
-    reservation, query = await _refresh_reservation(connectionId, nsi_client, store)
-    if reservation is None or query is None:
+    reservation, _ = await _refresh_reservation(connectionId, nsi_client, store)
+    if reservation is None:
         raise HTTPException(status_code=404, detail=f"Reservation {connectionId!r} not found")
-    # No proxy status means terminating, so the aggregator's lifecycle is read directly.
-    still_terminating = query.connection_states.lifecycle_state == "Terminating"
 
-    # Idempotent on retry: dispatch on the refreshed status. Terminate has no distinct in-flight
-    # state, so a duplicate while the first is mid-flight still re-sends (harmless: terminate is
-    # idempotent at the aggregator and both paths end TERMINATED).
-    match reservation.status:
-        case ReservationStatus.TERMINATED:
-            # Already terminated — re-deliver after the 202 returns (background, retrying).
-            reservation.callback_url = str(body.callbackURL)
-            asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
-                _send_callback(callback_client, reservation.callback_url, reservation)
-            )
-            return _accepted(connectionId)
-        case ReservationStatus.RESERVED | ReservationStatus.FAILED:
-            pass  # normal path below
-        case ReservationStatus.RESERVING if not store.is_reserve_in_flight(connectionId):
-            # Stuck at the aggregator: a child never answered, and our reserve already reported
-            # FAILED (or was lost on a restart). The aggregator accepts terminate while reserving.
-            log.info("Terminating a reservation the aggregator still reports as reserving")
-        case _ if still_terminating and not store.is_reserve_in_flight(connectionId):
-            # An earlier terminate is stuck at the aggregator; it resends to the children still terminating.
-            log.info("Retrying terminate of a reservation the aggregator still reports as terminating")
-        case _:
-            # Rejected before the callbackURL is adopted, so a running reserve still delivers to its own.
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Reservation is in {reservation.status} state, must be RESERVED, FAILED, "
-                    "or RESERVING without a reserve in progress to terminate"
-                ),
-            )
-    reservation.callback_url = str(body.callbackURL)
-
-    correlation_id = f"urn:uuid:{uuid4()}"
-    terminate_future = store.register_pending(correlation_id)
-
-    header = _operation_header(reservation.requester_nsa, correlation_id)
-    soap_bytes = build_terminate(header, connectionId)
-    log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
-    log.info("Sending terminate request to aggregator")
-
-    try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("terminate"))
-        raise_for_status(response, "terminate", connection_id=connectionId)
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        log.error("Failed to send terminate request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-    log.debug("Inbound SOAP terminate response", xml=response.text)
-    log.info("Terminate accepted by aggregator, waiting for confirmation")
-
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, Acknowledgment):
-        store.cancel_pending(correlation_id)
-        raise HTTPException(
-            status_code=502,
-            detail=_sync_failure_detail(sync_msg),
+    if reservation.status is ReservationStatus.TERMINATED:
+        # Already terminated — re-deliver to this request's callbackURL after the 202 returns
+        # (background, retrying), leaving any running operation's own callbackURL alone.
+        asyncio.create_task(  # noqa: RUF006 — fire-and-forget re-delivery; lifetime is app-scoped
+            _send_callback(callback_client, callback_url, reservation)
         )
+        return _accepted(connectionId)
+    # Rejected before the callbackURL is adopted, so a running reserve still delivers to its own.
+    if store.task_in_flight(Operation.RESERVE, connectionId):
+        raise HTTPException(status_code=409, detail="A reserve of this connection is still in progress")
+    if store.task_in_flight(Operation.TERMINATE, connectionId):
+        if callback_url:
+            reservation.extra_callback_urls.append(callback_url)
+        log.info("Terminate already in progress, not sent again")
+        return _accepted(connectionId)
+    # RESERVING or TERMINATING: stuck at the aggregator (a child never answered an earlier reserve or
+    # terminate). It accepts terminate in both and resends it only to the children still terminating.
+    terminable = (
+        ReservationStatus.RESERVED,
+        ReservationStatus.FAILED,
+        ReservationStatus.RESERVING,
+        ReservationStatus.TERMINATING,
+    )
+    if reservation.status not in terminable:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Reservation is in {reservation.status} state, must be RESERVED, FAILED, RESERVING or TERMINATING",
+        )
+    reservation.callback_url = callback_url
+    reservation.last_error = None
 
+    store.task_started(Operation.TERMINATE, connectionId)
+    try:
+        terminate_future = await _send_terminate(connectionId, reservation.requester_nsa, nsi_client, store)
+    except HTTPException:
+        store.task_finished(Operation.TERMINATE, connectionId)
+        raise
     asyncio.create_task(
-        _complete_terminate(connectionId, terminate_future, callback_client, store),
+        _complete_terminate(
+            connectionId, reservation.requester_nsa, terminate_future, nsi_client, callback_client, store
+        ),
         name=f"terminate-{connectionId}",
     )
 

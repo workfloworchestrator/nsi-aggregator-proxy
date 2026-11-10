@@ -17,7 +17,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 # Set required environment variables before any application module is imported.
@@ -138,6 +141,36 @@ def build_error_event_xml(
         f"<text>{error_text}</text>"
         f"</serviceException>"
         f"</nsi_ctypes:errorEvent>"
+    )
+
+
+def build_reserve_timeout_xml(
+    connection_id: str = "conn-001", notification_id: int = 1, timestamp: str = "2025-06-01T12:00:00Z"
+) -> str:
+    """Build a reserveTimeout XML fragment, for a callback or queryNotificationSyncConfirmed."""
+    return (
+        f'<nsi_ctypes:reserveTimeout xmlns:nsi_ctypes="{_C}">'
+        f"<connectionId>{connection_id}</connectionId>"
+        f"<notificationId>{notification_id}</notificationId>"
+        f"<timeStamp>{timestamp}</timeStamp>"
+        "<timeoutValue>120</timeoutValue>"
+        "<originatingConnectionId>orig-conn-001</originatingConnectionId>"
+        "<originatingNSA>urn:ogf:network:example.net:2025:nsa:child</originatingNSA>"
+        "</nsi_ctypes:reserveTimeout>"
+    )
+
+
+def build_message_delivery_timeout_xml(
+    connection_id: str = "conn-001", notification_id: int = 2, timestamp: str = "2025-06-01T12:00:00Z"
+) -> str:
+    """Build a messageDeliveryTimeout XML fragment, for a callback or queryNotificationSyncConfirmed."""
+    return (
+        f'<nsi_ctypes:messageDeliveryTimeout xmlns:nsi_ctypes="{_C}">'
+        f"<connectionId>{connection_id}</connectionId>"
+        f"<notificationId>{notification_id}</notificationId>"
+        f"<timeStamp>{timestamp}</timeStamp>"
+        "<correlationId>urn:uuid:00000000-0000-0000-0000-0000000000aa</correlationId>"
+        "</nsi_ctypes:messageDeliveryTimeout>"
     )
 
 
@@ -371,6 +404,44 @@ def get_pending_correlation_id(store: ReservationStore) -> str:
     keys = list(store._pending.keys())  # noqa: SLF001
     assert len(keys) == 1, f"Expected exactly 1 pending, got {len(keys)}"
     return keys[0]
+
+
+def utc_now_iso() -> str:
+    """The current time as an aggregator would stamp a notification."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def wait_until(predicate: Callable[[], bool], timeout: float = 3.0) -> None:
+    """Poll until ``predicate`` holds, failing the test after ``timeout`` seconds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        assert loop.time() < deadline, "condition not reached in time"
+        await asyncio.sleep(0.01)
+
+
+def build_reserve_request_body(
+    callback_url: str = "http://callback.example.com/result",
+    provider_nsa: str = "urn:ogf:network:example.net:2025:nsa:provider",
+    global_reservation_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a POST /reservations body for a 1000 Mb/s example.net circuit."""
+    body: dict[str, Any] = {
+        "description": "test circuit",
+        "criteria": {
+            "p2ps": {
+                "capacity": 1000,
+                "sourceSTP": "urn:ogf:network:example.net:2025:src?vlan=100",
+                "destSTP": "urn:ogf:network:example.net:2025:dst?vlan=200",
+            },
+        },
+        "requesterNSA": "urn:ogf:network:example.net:2025:nsa:requester",
+        "providerNSA": provider_nsa,
+        "callbackURL": callback_url,
+    }
+    if global_reservation_id is not None:
+        body["globalReservationId"] = global_reservation_id
+    return body
 
 
 def make_reservation(

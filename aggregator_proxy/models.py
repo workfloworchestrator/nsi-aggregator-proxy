@@ -67,6 +67,7 @@ class ReservationStatus(StrEnum):
     ACTIVATED = "ACTIVATED"
     DEACTIVATING = "DEACTIVATING"
     FAILED = "FAILED"
+    TERMINATING = "TERMINATING"
     TERMINATED = "TERMINATED"
 
 
@@ -168,9 +169,15 @@ class ReservationRequest(BaseModel):
 
 
 class CallbackRequest(BaseModel):
-    """Payload for provision, release and terminate requests."""
+    """Payload for provision and release requests."""
 
     callbackURL: AnyHttpUrl = Field(..., description="URL to receive the operation result callback.")
+
+
+class TerminateRequest(BaseModel):
+    """Payload for terminate requests; without a callbackURL the result is not delivered."""
+
+    callbackURL: AnyHttpUrl | None = Field(None, description="URL to receive the terminate result callback.")
 
 
 # ---------------------------------------------------------------------------

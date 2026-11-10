@@ -42,6 +42,15 @@ from aggregator_proxy.state_mapping import derive_status, map_nsi_states_to_stat
             ConnectionStates("ReserveStart", "Provisioned", "Terminated", True),
             ReservationStatus.TERMINATED,
         ),
+        # Terminating lifecycle: a terminate a child has not confirmed, whatever the reservation state
+        (
+            ConnectionStates("ReserveChecking", "Released", "Terminating", False),
+            ReservationStatus.TERMINATING,
+        ),
+        (
+            ConnectionStates("ReserveStart", "Provisioned", "Terminating", True),
+            ReservationStatus.TERMINATING,
+        ),
         # Failed lifecycle
         (
             ConnectionStates("ReserveStart", "Released", "Failed", False),
@@ -102,6 +111,8 @@ from aggregator_proxy.state_mapping import derive_status, map_nsi_states_to_stat
         "terminated",
         "passed-end-time",
         "terminated-overrides-active",
+        "terminating-while-reserving",
+        "terminating-while-active",
         "failed-lifecycle",
         "reserve-timeout",
         "reserve-failed",
@@ -298,3 +309,38 @@ def test_derive_status(
     )
     assert derived.status == expected_status
     assert (derived.reason is not None) == expect_reason
+
+
+_TIMED_OUT = "messageDeliveryTimeout: a child NSA did not reply"
+
+
+@pytest.mark.parametrize(
+    ("base", "timed_out", "expected_status", "expected_reason"),
+    [
+        pytest.param(
+            ReservationStatus.RESERVING, _TIMED_OUT, ReservationStatus.FAILED, _TIMED_OUT, id="reserve-failed"
+        ),
+        pytest.param(ReservationStatus.RESERVING, None, ReservationStatus.RESERVING, None, id="reserve-in-progress"),
+        pytest.param(
+            ReservationStatus.RESERVED, _TIMED_OUT, ReservationStatus.RESERVED, None, id="committed-unaffected"
+        ),
+        pytest.param(
+            ReservationStatus.TERMINATING, _TIMED_OUT, ReservationStatus.TERMINATING, _TIMED_OUT, id="terminate-reason"
+        ),
+    ],
+)
+def test_derive_status_timeout_notifications(
+    base: ReservationStatus, timed_out: str | None, expected_status: ReservationStatus, expected_reason: str | None
+) -> None:
+    """Safnari keeps a reserve pending forever after a timeout, so only the notification shows it failed."""
+    derived = derive_status(
+        base,
+        results=[],
+        data_plane_changes=[],
+        start_time=None,
+        now=_NOW,
+        dataplane_timeout=_TIMEOUT,
+        reserve_failure=timed_out,
+        terminate_failure=timed_out,
+    )
+    assert (derived.status, derived.reason) == (expected_status, expected_reason)

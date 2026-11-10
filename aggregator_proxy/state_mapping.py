@@ -27,17 +27,20 @@ def map_nsi_states_to_status(states: ConnectionStates, *, has_error_event: bool 
 
     Priority order:
     1. Terminated / PassedEndTime lifecycle → TERMINATED
-    2. Failed lifecycle → FAILED
-    3. ReserveTimeout / ReserveFailed / ReserveAborting → FAILED
-    4. has_error_event → FAILED
-    5. ReserveChecking / ReserveHeld / ReserveCommitting → RESERVING
-    6. Released + active → DEACTIVATING
-    7. dataPlaneStatus active → ACTIVATED
-    8. Provisioned (active=false) → ACTIVATING
-    9. Otherwise → RESERVED
+    2. Terminating lifecycle → TERMINATING
+    3. Failed lifecycle → FAILED
+    4. ReserveTimeout / ReserveFailed / ReserveAborting → FAILED
+    5. has_error_event → FAILED
+    6. ReserveChecking / ReserveHeld / ReserveCommitting → RESERVING
+    7. Released + active → DEACTIVATING
+    8. dataPlaneStatus active → ACTIVATED
+    9. Provisioned (active=false) → ACTIVATING
+    10. Otherwise → RESERVED
     """
     if states.lifecycle_state in ("Terminated", "PassedEndTime"):
         return ReservationStatus.TERMINATED
+    if states.lifecycle_state == "Terminating":
+        return ReservationStatus.TERMINATING
     if states.lifecycle_state == "Failed":
         return ReservationStatus.FAILED
     if states.reservation_state in ("ReserveTimeout", "ReserveFailed", "ReserveAborting"):
@@ -102,8 +105,13 @@ def derive_status(
     start_time: str | None,
     now: datetime,
     dataplane_timeout: timedelta,
+    reserve_failure: str | None = None,
+    terminate_failure: str | None = None,
 ) -> DerivedStatus:
-    """Refine the transient ``ACTIVATING``/``DEACTIVATING`` base status using durable aggregator data.
+    """Refine the transient ``RESERVING``/``ACTIVATING``/``DEACTIVATING`` base status using durable aggregator data.
+
+    RESERVING with a ``reserve_failure`` (a timeout notification) is FAILED: Safnari keeps such a
+    reservation pending forever. TERMINATING carries ``terminate_failure`` as its reason.
 
     For a provision whose data plane never came up within ``dataplane_timeout`` of the last
     provisionConfirmed (clamped to the reservation startTime), the connection is FAILED. A data plane
@@ -115,6 +123,12 @@ def derive_status(
     schedule_start = parse_iso8601(start_time) if start_time is not None else None
 
     match base:
+        case ReservationStatus.RESERVING if reserve_failure is not None:
+            return DerivedStatus(ReservationStatus.FAILED, reserve_failure)
+
+        case ReservationStatus.TERMINATING:
+            return DerivedStatus(base, terminate_failure)
+
         case ReservationStatus.ACTIVATING:
             provision_at = _latest_operation_time(results, "provisionConfirmed")
             if provision_at is None:

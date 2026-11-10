@@ -347,6 +347,8 @@ class TestTerminateSucceeds:
                     await asyncio.sleep(0.05)
 
                     cid = get_pending_correlation_id(store)
+                    # Like ACTIVATING and DEACTIVATING: in progress from the moment the aggregator accepts it.
+                    assert store.get(CONNECTION_ID).status == ReservationStatus.TERMINATING  # type: ignore[union-attr]
 
                     # Simulate terminateConfirmed callback
                     await test_client.post("/nsi/v2/callback", content=_terminate_confirmed_xml(cid))

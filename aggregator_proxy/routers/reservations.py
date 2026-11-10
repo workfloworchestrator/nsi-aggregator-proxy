@@ -1327,8 +1327,9 @@ async def terminate_reservation(
     """Terminate the connection identified by ``connectionId``.
 
     Allowed when the reservation is ``RESERVED``, ``FAILED``, ``RESERVING`` (a reserve stuck at the
-    aggregator) or ``TERMINATING`` (a retry), and no reserve of this proxy is waiting on it. The
-    result, ``TERMINATED`` once the aggregator has terminated and otherwise its current status, is
+    aggregator) or ``TERMINATING`` (a retry), and no reserve of this proxy is waiting on it. On
+    acceptance it transitions to ``TERMINATING``. The result, ``TERMINATED`` once the aggregator has
+    terminated and otherwise its current status, is
     delivered to ``callbackURL``; a terminate without one is not reported. While a terminate of this
     proxy runs, another is not sent: the result goes to every callbackURL given meanwhile as well.
     """
@@ -1377,6 +1378,7 @@ async def terminate_reservation(
     except HTTPException:
         store.task_finished(Operation.TERMINATE, connectionId)
         raise
+    store.update_status(connectionId, ReservationStatus.TERMINATING)
     asyncio.create_task(
         _complete_terminate(
             connectionId, reservation.requester_nsa, terminate_future, nsi_client, callback_client, store

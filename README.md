@@ -68,12 +68,10 @@ stateDiagram-v2
     state DEACTIVATING <<choice>>
     DEACTIVATING --> RESERVED : success
     DEACTIVATING --> FAILED : fail
-    RESERVED --> TERMINATE : Terminate
-    FAILED --> TERMINATE : Terminate
-    state TERMINATE <<choice>>
-    TERMINATE --> TERMINATED : confirmed
-    TERMINATE --> TERMINATING : not confirmed
-    TERMINATING --> TERMINATE : Terminate
+    RESERVED --> TERMINATING : Terminate
+    FAILED --> TERMINATING : Terminate
+    TERMINATING --> TERMINATED : confirmed
+    TERMINATING --> TERMINATING : Terminate again
 ```
 
 | State | Description |
@@ -84,7 +82,7 @@ stateDiagram-v2
 | `ACTIVATED` | Data plane is active, connection is fully operational |
 | `DEACTIVATING` | Release request sent, waiting for data plane to go down |
 | `FAILED` | An error occurred; the connection can be terminated from this state |
-| `TERMINATING` | The aggregator has not confirmed a terminate, usually because a child never replied; send terminate again |
+| `TERMINATING` | Terminate request sent, waiting for the aggregator to confirm; stays here if it does not (usually a child that never replied), until terminate is sent again |
 | `TERMINATED` | The aggregator has terminated the connection; terminal state |
 
 ### Status is derived from the aggregator on every read
@@ -565,7 +563,7 @@ stateDiagram-v2
 
 Terminate a connection. Allowed when the reservation is in the `RESERVED`, `FAILED`, `TERMINATING` or `RESERVING` state (a reserve stuck at the aggregator whose result this proxy has already reported), and no reserve of this proxy is still waiting on it. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating. A retry while a terminate of this proxy is still running is not sent again: it returns `202`, and the running terminate's result goes to its `callbackURL` as well as the first one's. Any other state returns `409`. A repeated reserve with the same `globalReservationId` never reuses a `TERMINATING` or `TERMINATED` reservation.
 
-The result is `TERMINATED` only once the aggregator has terminated the connection. When the aggregator does not confirm the terminate (an `error`, or no reply within `NSI_TIMEOUT`), the proxy sends it once more, unless the aggregator terminated meanwhile. Safnari resends it only to the children that have not confirmed, and counts a child that refuses it because it already terminated as terminated, so a child whose confirmation was lost settles without its callback. If that terminate is not confirmed either, the result is the aggregator's current status, normally `TERMINATING`, with the reason in `lastError`; send terminate again later.
+On acceptance the reservation transitions to `TERMINATING`. The result is `TERMINATED` only once the aggregator has terminated the connection. When the aggregator does not confirm the terminate (an `error`, or no reply within `NSI_TIMEOUT`), the proxy sends it once more, unless the aggregator terminated meanwhile. Safnari resends it only to the children that have not confirmed, and counts a child that refuses it because it already terminated as terminated, so a child whose confirmation was lost settles without its callback. If that terminate is not confirmed either, the result is the aggregator's current status, normally `TERMINATING`, with the reason in `lastError`; send terminate again later.
 
 #### Request Body
 

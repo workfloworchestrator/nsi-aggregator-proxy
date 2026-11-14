@@ -30,7 +30,7 @@ from aggregator_proxy.nsi_soap import (
 )
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
 from aggregator_proxy.reservation_store import ReservationStore
-from tests.conftest import build_error_event_xml
+from tests.conftest import build_error_event_xml, build_message_delivery_timeout_xml, build_reserve_timeout_xml
 
 _C = NSMAP["nsi_ctypes"]
 _H = NSMAP["nsi_headers"]
@@ -151,6 +151,44 @@ class TestCallbackResolvesPending:
         result = future.result()
         assert isinstance(result, ReserveConfirmed)
         assert result.connection_id == "conn-1"
+
+
+_MESSAGE_DELIVERY_TIMEOUT = build_message_delivery_timeout_xml("conn-1", notification_id=2)
+_RESERVE_TIMEOUT = build_reserve_timeout_xml("conn-1", notification_id=1)
+
+
+class TestCallbackTimeoutNotifications:
+    """Timeout notifications carry the aggregator's own correlationId: acknowledged, they end no wait.
+
+    An operation whose wait runs out reads them back from queryNotificationSync for its reason.
+    """
+
+    @pytest.mark.anyio()
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(_MESSAGE_DELIVERY_TIMEOUT, id="message-delivery-timeout"),
+            pytest.param(_RESERVE_TIMEOUT, id="reserve-timeout"),
+            pytest.param(
+                "<reserveAbortConfirmed><connectionId>conn-1</connectionId></reserveAbortConfirmed>", id="unsolicited"
+            ),
+        ],
+    )
+    async def test_acknowledged_without_ending_a_wait(
+        self, store: ReservationStore, _app_state: None, body: str
+    ) -> None:
+        operation = store.register_pending("urn:uuid:operation-corr")
+        data_plane = store.register_pending_by_connection("conn-1")
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/nsi/v2/callback", content=_envelope(body, correlation_id="urn:uuid:aggregator-generated")
+            )
+
+        assert resp.status_code == 200
+        assert isinstance(parse(resp.content), Acknowledgment)
+        assert not operation.done()
+        assert not data_plane.done()
 
 
 class TestCallbackAcknowledgement:

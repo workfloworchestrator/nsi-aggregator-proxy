@@ -16,10 +16,18 @@
 """In-memory store for reservations and pending NSI correlation tracking."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 
 from aggregator_proxy.models import P2PS, CriteriaResponse, ReservationStatus
 from aggregator_proxy.nsi_soap.parser import NsiMessage, ReserveConfirmed
+
+
+class Operation(StrEnum):
+    """An operation whose task this proxy tracks per connection, so a retry does not run it twice."""
+
+    RESERVE = "reserve"
+    TERMINATE = "terminate"
 
 
 @dataclass
@@ -35,6 +43,8 @@ class Reservation:
     callback_url: str = ""
     last_error: str | None = None
     seen_error_notification_ids: set[int] | None = None
+    # Further callbackURLs given while this proxy's terminate runs; they receive its result too.
+    extra_callback_urls: list[str] = field(default_factory=list)
 
 
 class ReservationStore:
@@ -51,7 +61,7 @@ class ReservationStore:
         self._reservations: dict[str, Reservation] = {}
         self._pending: dict[str, asyncio.Future[NsiMessage]] = {}
         self._pending_by_connection: dict[str, asyncio.Future[NsiMessage]] = {}
-        self._reserves_in_flight: set[str] = set()
+        self._tasks_in_flight: set[tuple[Operation, str]] = set()
 
     # ------------------------------------------------------------------
     # Reservation CRUD
@@ -86,17 +96,17 @@ class ReservationStore:
             ),
         )
 
-    def reserve_started(self, connection_id: str) -> None:
-        """Mark a reserve task as running for this connection."""
-        self._reserves_in_flight.add(connection_id)
+    def task_started(self, operation: Operation, connection_id: str) -> None:
+        """Mark this proxy's task for the operation as running for the connection."""
+        self._tasks_in_flight.add((operation, connection_id))
 
-    def reserve_finished(self, connection_id: str) -> None:
-        """Mark the reserve task for this connection as done."""
-        self._reserves_in_flight.discard(connection_id)
+    def task_finished(self, operation: Operation, connection_id: str) -> None:
+        """Mark this proxy's task for the operation as done for the connection."""
+        self._tasks_in_flight.discard((operation, connection_id))
 
-    def is_reserve_in_flight(self, connection_id: str) -> bool:
-        """True while this proxy's reserve task for the connection has not finished."""
-        return connection_id in self._reserves_in_flight
+    def task_in_flight(self, operation: Operation, connection_id: str) -> bool:
+        """True while this proxy's task for the operation on the connection has not finished."""
+        return (operation, connection_id) in self._tasks_in_flight
 
     # ------------------------------------------------------------------
     # Pending correlation tracking

@@ -15,11 +15,16 @@
 
 """Tests for the nsi_soap parse() dispatcher — all callback/response message types."""
 
+from pathlib import Path
+
 import pytest
+from lxml import etree
 
 from aggregator_proxy.nsi_soap import (
     Acknowledgment,
     DataPlaneStateChange,
+    GenericError,
+    MessageDeliveryTimeout,
     ProvisionConfirmed,
     ReleaseConfirmed,
     ReserveCommitConfirmed,
@@ -30,11 +35,15 @@ from aggregator_proxy.nsi_soap import (
     ReserveTimeout,
     SoapFault,
     TerminateConfirmed,
+    UnsolicitedReply,
     Variable,
     parse,
     parse_correlation_id,
 )
 from aggregator_proxy.nsi_soap.namespaces import NSMAP
+
+_SCHEMA_DIR = Path(__file__).resolve().parent.parent / "docs" / "schemas"
+_WSDL_NS = {"wsdl": "http://schemas.xmlsoap.org/wsdl/"}
 
 _C = NSMAP["nsi_ctypes"]
 _H = NSMAP["nsi_headers"]
@@ -262,6 +271,67 @@ class TestParseReserveTimeout:
         assert msg.timeout_value == 180
         assert msg.originating_connection_id == "orig-conn-1"
         assert msg.originating_nsa == "urn:ogf:network:child:2025:nsa"
+
+
+class TestParseMessageDeliveryTimeout:
+    def test_message_delivery_timeout(self) -> None:
+        xml = _envelope("""\
+<messageDeliveryTimeout>
+  <connectionId>conn-42</connectionId>
+  <notificationId>7</notificationId>
+  <timeStamp>2025-06-01T12:00:00Z</timeStamp>
+  <correlationId>urn:uuid:child-request</correlationId>
+</messageDeliveryTimeout>""")
+        assert parse(xml) == MessageDeliveryTimeout(
+            connection_id="conn-42",
+            notification_id=7,
+            timestamp="2025-06-01T12:00:00Z",
+            correlation_id="urn:uuid:child-request",
+        )
+
+
+class TestParseGenericError:
+    def test_error(self) -> None:
+        xml = _envelope("""\
+<error>
+  <serviceException>
+    <nsaId>urn:ogf:network:aggregator:2025:nsa</nsaId>
+    <connectionId>conn-42</connectionId>
+    <errorId>00500</errorId>
+    <text>GENERIC_RM_ERROR</text>
+  </serviceException>
+</error>""")
+        msg = parse(xml)
+        assert isinstance(msg, GenericError)
+        assert msg.service_exception.error_id == "00500"
+        assert msg.service_exception.connection_id == "conn-42"
+
+    def test_error_without_service_exception_raises(self) -> None:
+        with pytest.raises(ValueError, match="serviceException"):
+            parse(_envelope("<error/>"))
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["reserveAbortConfirmed", "querySummaryConfirmed", "queryNotificationConfirmed", "queryResultConfirmed"],
+)
+def test_unsolicited_reply(operation: str) -> None:
+    assert parse(_envelope(f"<{operation}/>")) == UnsolicitedReply(operation=operation)
+
+
+def _requester_operations() -> list[str]:
+    """Every operation a provider may send this requester, from the NSI CS v2 requester WSDL."""
+    wsdl = etree.parse(_SCHEMA_DIR / "ogf_nsi_connection_requester_v2_0.wsdl")
+    return sorted(set(wsdl.xpath("//wsdl:portType/wsdl:operation/@name", namespaces=_WSDL_NS)))
+
+
+@pytest.mark.parametrize("operation", _requester_operations())
+def test_every_requester_operation_is_dispatched(operation: str) -> None:
+    """No callback type may fall through to "Unknown NSI operation", which the callback endpoint answers with 400."""
+    try:
+        parse(_envelope(f"<{operation}/>"))
+    except ValueError as exc:
+        assert "Unknown NSI operation" not in str(exc)
 
 
 class TestParseReserveCommitFailed:

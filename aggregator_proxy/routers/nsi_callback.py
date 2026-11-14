@@ -36,7 +36,10 @@ from aggregator_proxy.dependencies import get_reservation_store
 from aggregator_proxy.nsi_soap import (
     DataPlaneStateChange,
     ErrorEvent,
+    MessageDeliveryTimeout,
     NsiHeader,
+    ReserveTimeout,
+    UnsolicitedReply,
     build_acknowledgment,
     build_soap_fault,
     parse,
@@ -86,6 +89,16 @@ async def nsi_callback(
     match message:
         case DataPlaneStateChange(connection_id=connection_id) | ErrorEvent(connection_id=connection_id):
             resolved = store.resolve_pending_by_connection(connection_id, message) or resolved
+        # These carry the aggregator's own correlationId and cannot be tied to one operation for sure,
+        # so they end no wait: one that runs out reads them back from queryNotificationSync.
+        case ReserveTimeout(connection_id=connection_id) | MessageDeliveryTimeout(connection_id=connection_id):
+            logger.info(
+                "Received NSI timeout notification", message_type=type(message).__name__, connection_id=connection_id
+            )
+            resolved = True
+        case UnsolicitedReply(operation=operation):
+            logger.warning("Received NSI reply to a request this proxy never sends", operation=operation)
+            resolved = True
 
     if not resolved:
         logger.warning(

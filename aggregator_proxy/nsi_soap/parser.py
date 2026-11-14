@@ -32,11 +32,14 @@ Asynchronous (POSTed to the replyTo URL):
   - ErrorEvent              — a child failed to (de)activate, its data plane failed, or it was ended
   - ReleaseConfirmed        — release succeeded, state returns to RESERVED
   - TerminateConfirmed      — connection terminated
+  - MessageDeliveryTimeout  — the aggregator got no reply from a child; the operation failed
+  - GenericError            — an operation failed without a state transition
+  - UnsolicitedReply        — a reply to a request this proxy never sends; acknowledged, not acted on
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from lxml import etree
 
@@ -188,6 +191,30 @@ class TerminateConfirmed:
 
 
 @dataclass
+class MessageDeliveryTimeout:
+    """The aggregator got no reply to a request it sent a child; ``correlation_id`` is that request's."""
+
+    connection_id: str
+    notification_id: int
+    timestamp: str
+    correlation_id: str
+
+
+@dataclass
+class GenericError:
+    """An error reply to an earlier request, named by the header correlationId."""
+
+    service_exception: ServiceException
+
+
+@dataclass
+class UnsolicitedReply:
+    """A reply to a request this proxy never sends (reserveAbort, the async queries)."""
+
+    operation: str
+
+
+@dataclass
 class QueryRecursiveResult:
     """Wrapper for queryRecursiveConfirmed callback carrying parsed reservations."""
 
@@ -215,8 +242,16 @@ NsiMessage = (
     | ErrorEvent
     | ReleaseConfirmed
     | TerminateConfirmed
+    | MessageDeliveryTimeout
+    | GenericError
+    | UnsolicitedReply
     | QueryRecursiveResult
     | SoapFault
+)
+
+# Requester operations a provider may send that answer requests this proxy never makes.
+_UNSOLICITED_REPLIES = frozenset(
+    {"reserveAbortConfirmed", "querySummaryConfirmed", "queryNotificationConfirmed", "queryResultConfirmed"}
 )
 
 
@@ -264,6 +299,14 @@ def _parse_service_exception(exc_el: etree._Element) -> ServiceException:
     )
 
 
+def _require_service_exception(operation: etree._Element) -> ServiceException:
+    """Parse the operation's required <serviceException>, raising ValueError if absent."""
+    exc = operation.find("serviceException")
+    if exc is None:
+        raise ValueError(f"<serviceException> not found in {etree.QName(operation.tag).localname}")
+    return _parse_service_exception(exc)
+
+
 def _parse_data_plane_state_change(element: etree._Element) -> DataPlaneStateChange:
     """Parse a <dataPlaneStateChange> element (callback or queryNotificationSync history)."""
     dps = element.find("dataPlaneStatus")
@@ -276,6 +319,28 @@ def _parse_data_plane_state_change(element: etree._Element) -> DataPlaneStateCha
         active=_require(dps, "active") == "true",
         version=int(_require(dps, "version")),
         version_consistent=_require(dps, "versionConsistent") == "true",
+    )
+
+
+def _parse_reserve_timeout(element: etree._Element) -> ReserveTimeout:
+    """Parse a <reserveTimeout> element (callback or queryNotificationSync history)."""
+    return ReserveTimeout(
+        connection_id=_require(element, "connectionId"),
+        notification_id=int(_require(element, "notificationId")),
+        timestamp=_require(element, "timeStamp"),
+        timeout_value=int(_require(element, "timeoutValue")),
+        originating_connection_id=_require(element, "originatingConnectionId"),
+        originating_nsa=_require(element, "originatingNSA"),
+    )
+
+
+def _parse_message_delivery_timeout(element: etree._Element) -> MessageDeliveryTimeout:
+    """Parse a <messageDeliveryTimeout> element (callback or queryNotificationSync history)."""
+    return MessageDeliveryTimeout(
+        connection_id=_require(element, "connectionId"),
+        notification_id=int(_require(element, "notificationId")),
+        timestamp=_require(element, "timeStamp"),
+        correlation_id=_require(element, "correlationId"),
     )
 
 
@@ -317,31 +382,27 @@ def parse(xml: XmlInput) -> NsiMessage:
             )
 
         case "reserveFailed":
-            exc = operation.find("serviceException")
-            if exc is None:
-                raise ValueError("<serviceException> not found in reserveFailed")
             return ReserveFailed(
                 connection_id=_require(operation, "connectionId"),
-                service_exception=_parse_service_exception(exc),
+                service_exception=_require_service_exception(operation),
             )
 
         case "reserveTimeout":
-            return ReserveTimeout(
-                connection_id=_require(operation, "connectionId"),
-                notification_id=int(_require(operation, "notificationId")),
-                timestamp=_require(operation, "timeStamp"),
-                timeout_value=int(_require(operation, "timeoutValue")),
-                originating_connection_id=_require(operation, "originatingConnectionId"),
-                originating_nsa=_require(operation, "originatingNSA"),
-            )
+            return _parse_reserve_timeout(operation)
+
+        case "messageDeliveryTimeout":
+            return _parse_message_delivery_timeout(operation)
+
+        case "error":
+            return GenericError(service_exception=_require_service_exception(operation))
+
+        case _ if local in _UNSOLICITED_REPLIES:
+            return UnsolicitedReply(operation=local)
 
         case "reserveCommitFailed":
-            exc = operation.find("serviceException")
-            if exc is None:
-                raise ValueError("<serviceException> not found in reserveCommitFailed")
             return ReserveCommitFailed(
                 connection_id=_require(operation, "connectionId"),
-                service_exception=_parse_service_exception(exc),
+                service_exception=_require_service_exception(operation),
             )
 
         case "reserveCommitConfirmed":
@@ -553,6 +614,8 @@ class Notifications:
 
     error_events: list[ErrorEvent]
     data_plane_changes: list[DataPlaneStateChange]
+    reserve_timeouts: list[ReserveTimeout] = field(default_factory=list)
+    delivery_timeouts: list[MessageDeliveryTimeout] = field(default_factory=list)
 
 
 def _parse_error_event(error_el: etree._Element) -> ErrorEvent:
@@ -572,8 +635,9 @@ def _parse_error_event(error_el: etree._Element) -> ErrorEvent:
 def parse_query_notification_sync(xml_bytes: bytes) -> Notifications:
     """Parse a queryNotificationSyncConfirmed SOAP envelope into its notification history.
 
-    Returns both the errorEvent notifications and the dataPlaneStateChange history; the latter is what
-    lets a caller tell "the data plane never came up" from "it came up and later went down".
+    Returns the errorEvent, reserveTimeout and messageDeliveryTimeout notifications and the
+    dataPlaneStateChange history; the latter is what lets a caller tell "the data plane never came up"
+    from "it came up and later went down".
     """
     root = etree.fromstring(xml_bytes)
     body = root.find(f"{{{NSMAP['soapenv']}}}Body")
@@ -589,6 +653,10 @@ def parse_query_notification_sync(xml_bytes: bytes) -> Notifications:
         error_events=[_parse_error_event(el) for el in confirmed.findall(f"{{{_C}}}errorEvent")],
         data_plane_changes=[
             _parse_data_plane_state_change(el) for el in confirmed.findall(f"{{{_C}}}dataPlaneStateChange")
+        ],
+        reserve_timeouts=[_parse_reserve_timeout(el) for el in confirmed.findall(f"{{{_C}}}reserveTimeout")],
+        delivery_timeouts=[
+            _parse_message_delivery_timeout(el) for el in confirmed.findall(f"{{{_C}}}messageDeliveryTimeout")
         ],
     )
 

@@ -60,7 +60,6 @@ stateDiagram-v2
     state RESERVING <<choice>>
     RESERVING --> RESERVED : success
     RESERVING --> FAILED : fail
-    FAILED --> TERMINATED : Terminate
     RESERVED --> ACTIVATING : Provision
     state ACTIVATING <<choice>>
     ACTIVATING --> ACTIVATED : success
@@ -69,7 +68,10 @@ stateDiagram-v2
     state DEACTIVATING <<choice>>
     DEACTIVATING --> RESERVED : success
     DEACTIVATING --> FAILED : fail
-    RESERVED --> TERMINATED : Terminate
+    RESERVED --> TERMINATING : Terminate
+    FAILED --> TERMINATING : Terminate
+    TERMINATING --> TERMINATED : confirmed
+    TERMINATING --> TERMINATING : Terminate again
 ```
 
 | State | Description |
@@ -80,18 +82,22 @@ stateDiagram-v2
 | `ACTIVATED` | Data plane is active, connection is fully operational |
 | `DEACTIVATING` | Release request sent, waiting for data plane to go down |
 | `FAILED` | An error occurred; the connection can be terminated from this state |
-| `TERMINATED` | Connection has been terminated; terminal state |
+| `TERMINATING` | Terminate request sent, waiting for the aggregator to confirm; stays here if it does not (usually a child that never replied), until terminate is sent again |
+| `TERMINATED` | The aggregator has terminated the connection; terminal state |
 
 ### Status is derived from the aggregator on every read
 
 The aggregator is the source of truth: each `GET /reservations[/{id}]` re-derives the status from a
 live query rather than trusting only the in-memory store, so it is correct even after a proxy restart
 (when the store is empty and rebuilt from the aggregator). The stable states
-(`RESERVED`/`ACTIVATED`/`FAILED`/`TERMINATED`) are taken directly. The transient states
-(`ACTIVATING`/`DEACTIVATING`) are an SLA the aggregator doesn't itself express, so they are resolved
-from the aggregator's durable history (`queryResultSync` for the provision/release timestamp,
-`queryNotificationSync` for the `dataPlaneStateChange` history):
+(`RESERVED`/`ACTIVATED`/`FAILED`/`TERMINATING`/`TERMINATED`) are taken directly. The transient states
+(`RESERVING`/`ACTIVATING`/`DEACTIVATING`) are resolved from the aggregator's durable history
+(`queryResultSync` for the provision/release timestamp, `queryNotificationSync` for the
+`dataPlaneStateChange`, `reserveTimeout` and `messageDeliveryTimeout` history):
 
+- **reserve the aggregator reported a `reserveTimeout` or `messageDeliveryTimeout` for** → `FAILED`.
+  When a child never replies, Safnari keeps the reservation pending forever, so only the notification
+  shows that the reserve cannot finish;
 - **provision whose data plane never comes up** within `DATAPLANE_TIMEOUT` of the last
   `provisionConfirmed` (clamped to the reservation start time) → `FAILED`;
 - **data plane that came up and then went inactive on its own** (still provisioned, no release or
@@ -204,7 +210,7 @@ a partial set aborts startup.
 
 All certificate paths are validated at startup. A path pointing at a missing file — a typo, or a Secret
 that failed to mount — aborts startup rather than silently weakening the TLS configuration.
-| `NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate) |
+| `NSI_TIMEOUT` | `180` | Seconds to wait for async NSI callbacks (reserve, commit, provision, release, terminate). Keep it above the aggregator's own reply timeout (Safnari's `safnari.async.reply.timeout`, 120 s by default), so its `messageDeliveryTimeout` is raised before the wait runs out and names the cause |
 | `DATAPLANE_TIMEOUT` | `300` | Seconds to wait for `DataPlaneStateChange` after provision or release |
 | `LOG_LEVEL` | `INFO` | Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
 | `HOST` | `0.0.0.0` | Bind host |
@@ -398,7 +404,7 @@ async with Client(transport) as client:
 
 ### POST /reservations
 
-Reserve a connection. On acceptance the reservation transitions to `RESERVING`. The proxy sends the NSI `reserve` request, waits for `reserveConfirmed`, automatically sends `reserveCommit`, waits for `reserveCommitConfirmed`, and delivers the final result (`RESERVED` or `FAILED`) to the `callbackURL`.
+Reserve a connection. On acceptance the reservation transitions to `RESERVING`. The proxy sends the NSI `reserve` request, waits for `reserveConfirmed`, automatically sends `reserveCommit`, waits for `reserveCommitConfirmed`, and delivers the final result (`RESERVED` or `FAILED`) to the `callbackURL`. When no reply comes within `NSI_TIMEOUT` (every operation works this way), `lastError` names the latest `reserveTimeout` or `messageDeliveryTimeout` the aggregator raised meanwhile, such as a child that never replied. The proxy acknowledges these notifications as they arrive but does not end the wait on them: they carry the aggregator's own correlationId, so they cannot be tied to one operation reliably.
 
 A repeat `reserve` carrying the same `globalReservationId` is idempotent: instead of creating a duplicate, the proxy reuses the existing reservation, adopts the new `callbackURL`, returns its `connectionId`, and re-delivers the result if it has already settled. This requires `globalReservationId` (without one, repeats are not deduplicated) and lets a caller safely retry a reserve whose callback was lost.
 
@@ -473,9 +479,10 @@ stateDiagram-v2
     state ReserveChecking <<choice>>
     ReserveChecking --> ReserveHeld : <-- reserveConfirmed
     ReserveChecking --> ReserveFailed : <-- reserveFailed
+    ReserveChecking --> ReserveTimeout : no reply within NSI_TIMEOUT
     ReserveHeld --> ReserveCommitting : --> reserveCommit
     state ReserveCommitting <<choice>>
-    ReserveHeld --> ReserveTimeout : <-- reserveTimeout
+    ReserveCommitting --> ReserveTimeout : no reply within NSI_TIMEOUT
     ReserveCommitting --> ReserveCommitted : <-- reserveCommitConfirmed
     ReserveCommitting --> ReserveCommitFailed : <-- reserveCommitFailed
     ReserveFailed --> [*] :  status FAILED
@@ -554,7 +561,9 @@ stateDiagram-v2
 
 ### DELETE /reservations/{connectionId}
 
-Terminate a connection. Allowed when the reservation is in the `RESERVED` or `FAILED` state, or in `RESERVING` when no reserve of this proxy is still waiting on it. The last case is a reserve stuck at the aggregator because a child never answered: the proxy has already reported `FAILED`, while the aggregator still reports it as reserving. A terminate is also accepted, in any state, while the aggregator's lifecycle state is still `Terminating` from an earlier terminate that did not complete, again only when no reserve of this proxy is waiting. Both successful termination and timeout result in the `TERMINATED` state. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating; any other state returns `409`.
+Terminate a connection. Allowed when the reservation is in the `RESERVED`, `FAILED`, `TERMINATING` or `RESERVING` state (a reserve stuck at the aggregator whose result this proxy has already reported), and no reserve of this proxy is still waiting on it. A retry once the connection is already `TERMINATED` is idempotent — the proxy re-delivers the result to the new `callbackURL` rather than re-terminating. A retry while a terminate of this proxy is still running is not sent again: it returns `202`, and the running terminate's result goes to its `callbackURL` as well as the first one's. Any other state returns `409`. A repeated reserve with the same `globalReservationId` never reuses a `TERMINATING` or `TERMINATED` reservation.
+
+On acceptance the reservation transitions to `TERMINATING`. The result is `TERMINATED` only once the aggregator has terminated the connection. When the aggregator does not confirm the terminate (an `error`, or no reply within `NSI_TIMEOUT`), the proxy sends it once more, unless the aggregator terminated meanwhile. Safnari resends it only to the children that have not confirmed, and counts a child that refuses it because it already terminated as terminated, so a child whose confirmation was lost settles without its callback. If that terminate is not confirmed either, the result is the aggregator's current status, normally `TERMINATING`, with the reason in `lastError`; send terminate again later.
 
 #### Request Body
 
@@ -563,6 +572,8 @@ Terminate a connection. Allowed when the reservation is in the `RESERVED` or `FA
   "callbackURL": "https://orchestrator.example.domain/callback"
 }
 ```
+
+`callbackURL` is optional here: without it (or without a body) the result is not delivered, which lets a caller re-send a terminate and read the outcome with `GET /reservations/{connectionId}`.
 
 #### Response
 
@@ -577,9 +588,15 @@ stateDiagram-v2
     TerminateStart --> Terminating : --> terminate
     state Terminating <<choice>>
     Terminating --> Terminated : <-- terminateConfirmed
-    Terminating --> TerminateFailed : <-- error
+    Terminating --> Resend : <-- error, or no reply within NSI_TIMEOUT
+    state Resend <<choice>>
+    Resend --> Terminated : aggregator lifecycle Terminated
+    Resend --> Retrying : --> terminate
+    state Retrying <<choice>>
+    Retrying --> Terminated : <-- terminateConfirmed
+    Retrying --> NotConfirmed : <-- error, or no reply within NSI_TIMEOUT
     Terminated --> [*] :  status TERMINATED
-    TerminateFailed --> [*] :  status TERMINATED
+    NotConfirmed --> [*] :  the aggregator's status, normally TERMINATING
 ```
 
 ### GET /reservations/{connectionId}
@@ -631,7 +648,7 @@ Get the details of a single reservation. Before returning, the proxy queries the
 | `connectionId` | string | The connection identifier assigned by the aggregator |
 | `description` | string | Human-readable description |
 | `criteria` | object or null | Reservation criteria including version, service type, and point-to-point parameters |
-| `status` | string | Current state: `RESERVING`, `RESERVED`, `ACTIVATING`, `ACTIVATED`, `DEACTIVATING`, `FAILED`, or `TERMINATED` |
+| `status` | string | Current state: `RESERVING`, `RESERVED`, `ACTIVATING`, `ACTIVATED`, `DEACTIVATING`, `FAILED`, `TERMINATING`, or `TERMINATED` |
 | `lastError` | string or null | Human-readable description of the most recent error, if any |
 | `segments` | array or null | Path segments (child connections); only present when `detail=full` or `detail=recursive`. Each segment has `order`, `connectionId`, `providerNSA`, `serviceType`, `capacity`, `sourceSTP`, `destSTP`, and `status` (only with `detail=recursive`). |
 

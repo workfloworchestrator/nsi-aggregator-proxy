@@ -80,6 +80,8 @@ def upa() -> _UpaHandler:
 def client(upa: _UpaHandler, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(settings, "dds_proxy_url", DDS_PROXY_URL)
     dds_client = httpx.AsyncClient(transport=httpx.MockTransport(_dds_handler))
+    # A test that needs another client assigns it directly: patching the same attribute twice breaks
+    # monkeypatch's undo on Starlette's State (pytest 9.2).
     monkeypatch.setattr(app.state, "nsi_client", dds_client, raising=False)
     monkeypatch.setattr(app.state, "upa_client", httpx.AsyncClient(transport=httpx.MockTransport(upa)), raising=False)
     return TestClient(app, raise_server_exceptions=False)
@@ -153,8 +155,8 @@ def test_lists_only_the_peered_upas(client: TestClient) -> None:
     "path",
     [pytest.param("/providers", id="list"), pytest.param(f"/providers/{UPA_NSA}/reservations", id="reservations")],
 )
-def test_unconfigured_returns_503(client: TestClient, monkeypatch: pytest.MonkeyPatch, path: str) -> None:
-    monkeypatch.setattr(app.state, "upa_client", None)
+def test_unconfigured_returns_503(client: TestClient, path: str) -> None:
+    app.state.upa_client = None
 
     assert client.get(path).status_code == 503
 
@@ -167,10 +169,8 @@ def test_unconfigured_returns_503(client: TestClient, monkeypatch: pytest.Monkey
         pytest.param("upa_client", f"/providers/{UPA_NSA}/reservations", id="reservations-upa-down"),
     ],
 )
-def test_unreachable_returns_502(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, client_attr: str, path: str
-) -> None:
-    monkeypatch.setattr(app.state, client_attr, httpx.AsyncClient(transport=httpx.MockTransport(_failing_handler)))
+def test_unreachable_returns_502(client: TestClient, client_attr: str, path: str) -> None:
+    setattr(app.state, client_attr, httpx.AsyncClient(transport=httpx.MockTransport(_failing_handler)))
 
     assert client.get(path).status_code == 502
 

@@ -44,6 +44,7 @@ from tests.conftest import (
 
 CALLBACK_URL = "http://callback.example.com/result"
 CONNECTION_ID = "test-conn-789"
+_UNPARSEABLE = b"<not-soap"
 
 
 def _terminate_confirmed_xml(correlation_id: str) -> bytes:
@@ -364,12 +365,14 @@ class _Aggregator:
     ``query_failure`` makes every query after the first terminate fail: "unavailable" with a 503,
     "malformed" with a body that does not parse. ``terminated_before_resend`` terminates the
     connection before a second terminate arrives, which is then refused with a fault.
+    ``unparseable_acks`` numbers the terminates (1 is the first) answered with a body that does not parse.
     """
 
     lifecycle_state: str = "Created"
     terminates: int = 0
     query_failure: str | None = None
     terminated_before_resend: bool = False
+    unparseable_acks: tuple[int, ...] = ()
     notifications: list[str] = field(default_factory=list)
 
     def delivery_timeout(self) -> bytes:
@@ -386,7 +389,7 @@ class _Aggregator:
                 case "unavailable":
                     return httpx.Response(503)
                 case "malformed":
-                    return httpx.Response(200, content=b"<not-soap")
+                    return httpx.Response(200, content=_UNPARSEABLE)
         if "queryNotificationSync" in body:
             return httpx.Response(200, content=build_query_notification_sync_response(cid, *self.notifications))
         if "querySummarySync" in body:
@@ -397,15 +400,14 @@ class _Aggregator:
                 ),
             )
         self.terminates += 1
-        if self.terminated_before_resend and self.terminates > 1:
+        refused = self.terminated_before_resend and self.terminates > 1
+        if refused:
             self.lifecycle_state = "Terminated"
+        if self.terminates in self.unparseable_acks:
+            return httpx.Response(200, content=_UNPARSEABLE)
+        if refused:
             return httpx.Response(500, content=build_soap_fault("00201: INVALID_TRANSITION"))
         return httpx.Response(200, content=build_acknowledgment_xml(cid))
-
-
-def _latest_pending_correlation_id(store: ReservationStore) -> str:
-    """The most recently registered correlationId; a timed-out terminate's stays registered."""
-    return list(store._pending)[-1]  # noqa: SLF001
 
 
 class TestTerminateNotConfirmed:
@@ -486,7 +488,7 @@ class TestTerminateNotConfirmed:
                         match reply:
                             case "confirmed":
                                 aggregator.lifecycle_state = "Terminated"
-                                cid = _latest_pending_correlation_id(store)
+                                cid = get_pending_correlation_id(store)
                                 await client.post("/nsi/v2/callback", content=_terminate_confirmed_xml(cid))
                             case "delivery-timeout":
                                 ack = await client.post("/nsi/v2/callback", content=aggregator.delivery_timeout())
@@ -497,6 +499,7 @@ class TestTerminateNotConfirmed:
                     listed = (await client.get(f"/reservations/{CONNECTION_ID}")).json()
 
         assert aggregator.terminates == len(replies)
+        assert not store._pending  # noqa: SLF001 — a wait that timed out is not kept registered
         assert callbacks[0]["status"] == expected_status
         reservation = store.get(CONNECTION_ID)
         assert reservation is not None
@@ -512,8 +515,12 @@ class TestTerminateNotConfirmed:
             # The refresh deciding whether to resend fails: resend anyway, it is harmless.
             pytest.param(_Aggregator(query_failure="unavailable"), id="refresh-unavailable"),
             pytest.param(_Aggregator(query_failure="malformed"), id="refresh-malformed"),
-            # The aggregator terminated before the resend arrived, and refuses it.
+            # The aggregator terminated before the resend arrived, and refuses it, or answers it unparseably.
             pytest.param(_Aggregator(terminated_before_resend=True), id="resend-refused-after-terminated"),
+            pytest.param(
+                _Aggregator(terminated_before_resend=True, unparseable_acks=(2,)),
+                id="resend-unparseable-after-terminated",
+            ),
         ],
     )
     async def test_terminate_settles_when_the_aggregator_misbehaves(
@@ -543,7 +550,7 @@ class TestTerminateNotConfirmed:
                     await client.post("/nsi/v2/callback", content=aggregator.delivery_timeout())
                     if not aggregator.terminated_before_resend:
                         await wait_until(lambda: aggregator.terminates == 2)
-                        cid = _latest_pending_correlation_id(store)
+                        cid = get_pending_correlation_id(store)
                         await client.post("/nsi/v2/callback", content=_terminate_confirmed_xml(cid))
                     await wait_until(lambda: bool(callbacks))
 
@@ -624,3 +631,64 @@ class TestTerminateWhileTerminating:
                     await asyncio.sleep(0.05)
 
         assert callbacks == []
+
+    @pytest.mark.anyio()
+    async def test_unparseable_acknowledgement_does_not_block_a_retry(self, store: ReservationStore) -> None:
+        """A failed send releases the in-flight mark; otherwise every later terminate answers 202 and sends nothing."""
+        store.create(_make_reservation(status=ReservationStatus.RESERVED))
+        aggregator = _Aggregator(unparseable_acks=(1,))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(aggregator.handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(_callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    body = {"callbackURL": CALLBACK_URL}
+                    first = await client.request("DELETE", f"/reservations/{CONNECTION_ID}", json=body)
+                    second = await client.request("DELETE", f"/reservations/{CONNECTION_ID}", json=body)
+                    assert aggregator.terminates == 2
+                    cid = get_pending_correlation_id(store)
+                    await client.post("/nsi/v2/callback", content=_terminate_confirmed_xml(cid))
+                    await wait_until(
+                        lambda: store.get(CONNECTION_ID).status == ReservationStatus.TERMINATED  # type: ignore[union-attr]
+                    )
+
+        assert (first.status_code, second.status_code) == (502, 202)
+
+    @pytest.mark.anyio()
+    async def test_callback_url_given_while_delivering_is_delivered(
+        self, store: ReservationStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry that arrives while the result goes out is still in flight, so it gets the result too."""
+        from aggregator_proxy import settings as settings_module
+
+        monkeypatch.setattr(settings_module.settings, "nsi_timeout", 0.1)
+        retry_url = "http://callback.example.com/retry"
+        store.create(_make_reservation(status=ReservationStatus.RESERVED))
+        aggregator = _Aggregator()
+        delivered: list[tuple[str, object]] = []
+        release = asyncio.Event()
+
+        async def callback_handler(request: httpx.Request) -> httpx.Response:
+            delivered.append((str(request.url), json.loads(request.content)["status"]))
+            await release.wait()
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(aggregator.handler)) as nsi_client:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(callback_handler)) as cb_client:
+                app.state.nsi_client = nsi_client
+                app.state.callback_client = cb_client
+                app.state.reservation_store = store
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                    await client.request("DELETE", f"/reservations/{CONNECTION_ID}", json={"callbackURL": CALLBACK_URL})
+                    aggregator.lifecycle_state = "Terminating"
+                    await wait_until(lambda: len(delivered) == 1)
+                    body = {"callbackURL": retry_url}
+                    retry = await client.request("DELETE", f"/reservations/{CONNECTION_ID}", json=body)
+                    release.set()
+                    await wait_until(lambda: len(delivered) == 2)
+                    await wait_until(lambda: not store.task_in_flight(Operation.TERMINATE, CONNECTION_ID))
+
+        assert retry.status_code == 202
+        assert delivered == [(CALLBACK_URL, ReservationStatus.TERMINATING), (retry_url, ReservationStatus.TERMINATING)]

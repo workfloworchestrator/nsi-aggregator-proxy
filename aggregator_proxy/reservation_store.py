@@ -16,6 +16,7 @@
 """In-memory store for reservations and pending NSI correlation tracking."""
 
 import asyncio
+import functools
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -120,7 +121,13 @@ class ReservationStore:
         """
         future: asyncio.Future[NsiMessage] = asyncio.get_running_loop().create_future()
         self._pending[correlation_id] = future
+        future.add_done_callback(functools.partial(self._forget_pending, correlation_id))
         return future
+
+    def _forget_pending(self, correlation_id: str, future: asyncio.Future[NsiMessage]) -> None:
+        """Drop a finished Future, so one whose wait timed out and was cancelled does not stay registered."""
+        if self._pending.get(correlation_id) is future:
+            del self._pending[correlation_id]
 
     def resolve_pending(self, correlation_id: str, message: NsiMessage) -> bool:
         """Set the result on a pending Future; returns True if one was found."""

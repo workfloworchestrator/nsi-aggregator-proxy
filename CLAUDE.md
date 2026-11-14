@@ -201,6 +201,8 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
   `RESERVING`, while our reserve task has already timed out and reported `FAILED`. Refusing it left
   the requester no way to clean up. `ReservationStore` tracks running reserve and terminate tasks
   (`task_started(Operation.…, id)` before the task is spawned, `task_finished` in its `finally`).
+  Terminate also releases it at once when starting fails, whatever the error: a mark left set blocks
+  every later terminate.
   While a reserve runs, terminate answers 409 and does not adopt its `callbackURL`, so the reserve
   result goes where it was asked; only a connection the aggregator already terminated is re-delivered
   to the terminate's `callbackURL`. After a restart nothing is in flight, so a `RESERVING`
@@ -222,10 +224,11 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
 - **Terminate is retried in TERMINATING, but never twice at once**: the match accepts `TERMINATING`
   and `RESERVING`. While a terminate of ours runs another one is not sent: it answers 202, and its
   `callbackURL`, if any, is added to `Reservation.extra_callback_urls`, so the running terminate's
-  result goes to every caller. Otherwise a retry would steal the first one's callback and double the
-  resends. `callbackURL` is optional on terminate, so a caller can re-send one without an open
-  callback and read the result, `lastError` included, with GET: a refreshed TERMINATING carries the
-  latest messageDeliveryTimeout, also after a restart.
+  result goes to every caller, also one that arrives while the result is being delivered (the
+  terminate stays in flight until the list is empty). Otherwise a retry would steal the first one's
+  callback and double the resends. `callbackURL` is optional on terminate, so a caller can re-send
+  one without an open callback and read the result, `lastError` included, with GET: a refreshed
+  TERMINATING carries the latest messageDeliveryTimeout, also after a restart.
 - **`reserveTimeout` and `messageDeliveryTimeout` end no wait**: Safnari sends both with a new
   correlationId of its own (`messageDeliveryTimeout`'s body carries the child request's), in either
   order, and a reserve's pair can arrive after a later operation was sent. Nothing ties one to a

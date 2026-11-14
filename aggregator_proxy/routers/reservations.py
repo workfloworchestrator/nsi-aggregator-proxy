@@ -1217,7 +1217,8 @@ async def _send_terminate(
     """Send terminate to the aggregator and return the future its reply resolves.
 
     Raises:
-        HTTPException: 502 when the aggregator cannot be reached or does not acknowledge the terminate.
+        HTTPException: 502 when the aggregator cannot be reached, does not acknowledge the terminate, or
+            answers with something that does not parse.
     """
     log = logger.bind(connection_id=connection_id)
     correlation_id = f"urn:uuid:{uuid4()}"
@@ -1229,18 +1230,26 @@ async def _send_terminate(
     log.info("Sending terminate request to aggregator")
 
     try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("terminate"))
-        raise_for_status(response, "terminate", connection_id=connection_id)
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        log.error("Failed to send terminate request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+        try:
+            response = await nsi_client.post(
+                settings.provider_url, content=soap_bytes, headers=soap_headers("terminate")
+            )
+            raise_for_status(response, "terminate", connection_id=connection_id)
+        except Exception as exc:
+            log.error("Failed to send terminate request to aggregator", error=str(exc))
+            raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
 
-    log.debug("Inbound SOAP terminate response", xml=response.text)
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, Acknowledgment):
+        log.debug("Inbound SOAP terminate response", xml=response.text)
+        try:
+            sync_msg = parse(response.content)
+        except Exception as exc:
+            log.error("Unparseable terminate response from aggregator", error=str(exc))
+            raise HTTPException(status_code=502, detail="Unparseable response from NSI aggregator") from exc
+        if not isinstance(sync_msg, Acknowledgment):
+            raise HTTPException(status_code=502, detail=_sync_failure_detail(sync_msg))
+    except BaseException:
         store.cancel_pending(correlation_id)
-        raise HTTPException(status_code=502, detail=_sync_failure_detail(sync_msg))
+        raise
     log.info("Terminate accepted by aggregator, waiting for confirmation")
     return terminate_future
 
@@ -1264,9 +1273,11 @@ async def _complete_terminate(
         reservation = store.get(connection_id)
         if reservation is not None:
             reservation.last_error = reason
-            urls = dict.fromkeys([reservation.callback_url, *reservation.extra_callback_urls])
-            reservation.extra_callback_urls = []
-            await asyncio.gather(*(_send_callback(callback_client, url, reservation) for url in urls))
+            reservation.extra_callback_urls.insert(0, reservation.callback_url)
+            # A callbackURL given meanwhile joins the list: the terminate stays in flight until it is empty.
+            while reservation.extra_callback_urls:
+                urls, reservation.extra_callback_urls = dict.fromkeys(reservation.extra_callback_urls), []
+                await asyncio.gather(*(_send_callback(callback_client, url, reservation) for url in urls))
         log.info("Terminate finished", status=status, reason=reason)
 
     async def aggregator_status() -> ReservationStatus | None:
@@ -1375,16 +1386,17 @@ async def terminate_reservation(
     store.task_started(Operation.TERMINATE, connectionId)
     try:
         terminate_future = await _send_terminate(connectionId, reservation.requester_nsa, nsi_client, store)
-    except HTTPException:
+        store.update_status(connectionId, ReservationStatus.TERMINATING)
+        asyncio.create_task(
+            _complete_terminate(
+                connectionId, reservation.requester_nsa, terminate_future, nsi_client, callback_client, store
+            ),
+            name=f"terminate-{connectionId}",
+        )
+    except BaseException:
+        # Any failure before the task takes over must release the mark.
         store.task_finished(Operation.TERMINATE, connectionId)
         raise
-    store.update_status(connectionId, ReservationStatus.TERMINATING)
-    asyncio.create_task(
-        _complete_terminate(
-            connectionId, reservation.requester_nsa, terminate_future, nsi_client, callback_client, store
-        ),
-        name=f"terminate-{connectionId}",
-    )
 
     return _accepted(connectionId)
 

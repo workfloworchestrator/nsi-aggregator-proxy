@@ -187,7 +187,8 @@ The state mapping module (`aggregator_proxy/state_mapping.py`) maps NSI sub-stat
   auth path is covered by the `HTTPException` handler in `main.py`, which routes only this path to
   `soap_fault_response` and delegates everything else to FastAPI's JSON handler — the REST endpoints
   must keep returning JSON.
-- **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), `store.register_pending(correlation_id)` is called *before* the outbound SOAP POST. If the future were registered after, the callback could arrive and be dropped before the future exists.
+- **Register pending future before sending SOAP**: in every operation that awaits an async callback (reserve, commit, provision, release, terminate, queryRecursive), the future is registered *before* the outbound SOAP POST, with `with store.pending(correlation_id) as future:`. If the future were registered after, the callback could arrive and be dropped before the future exists. The block drops the future again if the send raises anything, so a failed send leaves nothing registered; once it has finished the caller owns the future, and a failure before the background task takes over is not covered.
+- **An operation's acknowledgement that does not parse is a 502** (`_send_sync`, which also checks the answer's type), like any other unexpected answer. The reserveCommit answer is not parsed at all, and the query calls' parsers are not guarded (an unparseable answer there is a 500). A send whose answer is lost or garbled may still have been accepted by the aggregator: the proxy then has no task waiting for its callback, and a retry that finds the reservation in flight assumes one.
 - **The ERO is request-only, and that asymmetry is deliberate**: `P2PS` (response) and `P2PSRequest` (which adds `ero`) are *siblings* over `P2PSBase`, not parent and child, so passing a request where a response is expected is a mypy error rather than a silent leak into every GET, the callback payload and the MCP tool schemas. The aggregator answers with its own *resolved* route, so echoing the request's ero back under the same name would be misleading. `_response_p2ps` is the one place that converts.
 - **STP validation is the `Stp` annotated type** (`Annotated[str, AfterValidator(_check_stp)]`), not a `@field_validator`. It applies per item, so `list[Stp]` validates each ERO member; a plain field validator would be handed the whole list and raise `TypeError`, which pydantic does not convert into a 422.
 - **The p2ps `<ero>` elements are unqualified**: neither the p2p nor the types XSD declares `elementFormDefault`, so `ero`/`orderedSTP`/`stp` carry no namespace, and the XSD sequence puts `ero` directly after `destSTP`. `test_schema_validation.py` alone will *not* catch a namespace mistake — `P2PServiceBaseType` ends with `<xsd:any namespace="##other" processContents="lax"/>`, so an ero built in the types namespace validates clean and is then silently dropped by safnari. `test_builders.py` asserts the bare tag names for that reason.
@@ -263,6 +264,9 @@ child acknowledges requests but never replies, for reserves with and without a l
 in both notification orders, in Safnari's exact format with synthetic NSA ids, connection ids and
 timestamps. `test_replay_child_never_replies.py` replays them. This repo is public: keep every
 fixture synthetic.
+
+`test_unparseable_answer.py` feeds every operation an acknowledgement that does not parse, and expects
+a 502 with nothing left registered.
 
 ### Local env file
 

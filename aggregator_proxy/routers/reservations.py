@@ -27,6 +27,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
+from structlog.typing import FilteringBoundLogger
 
 from aggregator_proxy.dependencies import NsiClient, get_callback_client, get_reservation_store
 from aggregator_proxy.models import (
@@ -127,6 +128,35 @@ def _sync_failure_detail(sync_msg: NsiMessage) -> str:
             return f"Aggregator returned a SOAP Fault: {text}"
         case _:
             return f"Unexpected sync response from aggregator: {type(sync_msg).__name__}"
+
+
+async def _send_sync[M: NsiMessage](
+    nsi_client: httpx.AsyncClient,
+    soap_bytes: bytes,
+    operation: str,
+    expected: type[M],
+    log: FilteringBoundLogger,
+    **ids: str,
+) -> M:
+    """POST ``operation`` and return the aggregator's synchronous answer, which must be an ``expected``.
+
+    Anything else, an answer that does not parse included, is a 502.
+    """
+    try:
+        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers(operation))
+        raise_for_status(response, operation, **ids)
+    except Exception as exc:
+        log.error("Failed to send request to aggregator", operation=operation, error=str(exc))
+        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
+    log.debug("Inbound SOAP response", operation=operation, xml=response.text)
+    try:
+        sync_msg = parse(response.content)
+    except Exception as exc:
+        log.exception("Unparseable response from aggregator", operation=operation, error=str(exc))
+        raise HTTPException(status_code=502, detail="Unparseable response from NSI aggregator") from exc
+    if not isinstance(sync_msg, expected):
+        raise HTTPException(status_code=502, detail=_sync_failure_detail(sync_msg))
+    return sync_msg
 
 
 _DEFAULT_SERVICE_TYPE = "http://services.ogf.org/nsi/2013/12/descriptions/EVTS.A-GOLE"
@@ -550,30 +580,11 @@ async def _refresh_reservation_recursive(
 ) -> tuple[Reservation | None, QueryReservation | None]:
     """Query the aggregator recursively for a single reservation with per-segment states."""
     header = _query_header()
-    correlation_id = header.correlation_id
-    future = store.register_pending(correlation_id)
-
+    log = logger.bind(connection_id=connection_id)
     soap_bytes = build_query_recursive(header, connection_id=connection_id)
-    logger.debug("Outbound SOAP queryRecursive request", xml=soap_bytes.decode(), connection_id=connection_id)
-    try:
-        response = await nsi_client.post(
-            settings.provider_url, content=soap_bytes, headers=soap_headers("queryRecursive")
-        )
-        raise_for_status(response, "queryRecursive", connection_id=connection_id)
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        logger.error("Failed to send queryRecursive to aggregator", connection_id=connection_id, error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-    logger.debug("Inbound SOAP queryRecursive acknowledgment", xml=response.text, connection_id=connection_id)
-
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, Acknowledgment):
-        store.cancel_pending(correlation_id)
-        raise HTTPException(
-            status_code=502,
-            detail=_sync_failure_detail(sync_msg),
-        )
+    log.debug("Outbound SOAP queryRecursive request", xml=soap_bytes.decode())
+    with store.pending(header.correlation_id) as future:
+        await _send_sync(nsi_client, soap_bytes, "queryRecursive", Acknowledgment, log, connection_id=connection_id)
 
     try:
         result = await asyncio.wait_for(future, timeout=settings.nsi_timeout)
@@ -711,7 +722,6 @@ async def _complete_reserve(
 
         # --- Phase 2: send reserveCommit, wait for commit result ---
         commit_correlation_id = f"urn:uuid:{uuid4()}"
-        commit_future = store.register_pending(commit_correlation_id)
         reservation = store.get(connection_id)
         requester_nsa = reservation.requester_nsa if reservation is not None else ""
         header = _operation_header(requester_nsa, commit_correlation_id)
@@ -719,12 +729,12 @@ async def _complete_reserve(
         log.debug("Outbound SOAP reserveCommit request", xml=soap_bytes.decode())
         log.info("Sending reserveCommit to aggregator")
         try:
-            response = await nsi_client.post(
-                settings.provider_url, content=soap_bytes, headers=soap_headers("reserveCommit")
-            )
-            raise_for_status(response, "reserveCommit", connection_id=connection_id)
+            with store.pending(commit_correlation_id) as commit_future:
+                response = await nsi_client.post(
+                    settings.provider_url, content=soap_bytes, headers=soap_headers("reserveCommit")
+                )
+                raise_for_status(response, "reserveCommit", connection_id=connection_id)
         except Exception as exc:
-            store.cancel_pending(commit_correlation_id)
             log.error("Failed to send reserveCommit to aggregator", error=str(exc))
             await fail("failed to send reserveCommit to aggregator")
             return
@@ -821,10 +831,6 @@ async def create_reservation(
             return _accepted(existing.connection_id)
 
     correlation_id = f"urn:uuid:{uuid4()}"
-    # Register the future BEFORE sending the SOAP request so the callback
-    # can never arrive before we are ready to receive it.
-    reserve_future = store.register_pending(correlation_id)
-
     now = datetime.now(timezone.utc)
     header = _operation_header(body.requesterNSA, correlation_id)
     soap_bytes = build_reserve(
@@ -843,23 +849,8 @@ async def create_reservation(
     log.debug("Outbound SOAP reserve request", xml=soap_bytes.decode())
     log.info("Sending reserve request to aggregator")
 
-    try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("reserve"))
-        raise_for_status(response, "reserve")
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        logger.error("Failed to send reserve request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-    log.debug("Inbound SOAP reserve response", xml=response.text)
-
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, ReserveResponse):
-        store.cancel_pending(correlation_id)
-        raise HTTPException(
-            status_code=502,
-            detail=_sync_failure_detail(sync_msg),
-        )
+    with store.pending(correlation_id) as reserve_future:
+        sync_msg = await _send_sync(nsi_client, soap_bytes, "reserve", ReserveResponse, log)
 
     connection_id = sync_msg.connection_id
     log = log.bind(connection_id=connection_id)
@@ -1038,31 +1029,14 @@ async def provision_reservation(
             )
 
     correlation_id = f"urn:uuid:{uuid4()}"
-    provision_future = store.register_pending(correlation_id)
-
     header = _operation_header(reservation.requester_nsa, correlation_id)
     soap_bytes = build_provision(header, connectionId)
     log.debug("Outbound SOAP provision request", xml=soap_bytes.decode())
     log.info("Sending provision request to aggregator")
 
-    try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("provision"))
-        raise_for_status(response, "provision", connection_id=connectionId)
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        log.error("Failed to send provision request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-    log.debug("Inbound SOAP provision response", xml=response.text)
+    with store.pending(correlation_id) as provision_future:
+        await _send_sync(nsi_client, soap_bytes, "provision", Acknowledgment, log, connection_id=connectionId)
     log.info("Provision accepted by aggregator, waiting for confirmation")
-
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, Acknowledgment):
-        store.cancel_pending(correlation_id)
-        raise HTTPException(
-            status_code=502,
-            detail=_sync_failure_detail(sync_msg),
-        )
 
     store.update_status(connectionId, ReservationStatus.ACTIVATING)
 
@@ -1172,31 +1146,14 @@ async def release_reservation(
             )
 
     correlation_id = f"urn:uuid:{uuid4()}"
-    release_future = store.register_pending(correlation_id)
-
     header = _operation_header(reservation.requester_nsa, correlation_id)
     soap_bytes = build_release(header, connectionId)
     log.debug("Outbound SOAP release request", xml=soap_bytes.decode())
     log.info("Sending release request to aggregator")
 
-    try:
-        response = await nsi_client.post(settings.provider_url, content=soap_bytes, headers=soap_headers("release"))
-        raise_for_status(response, "release", connection_id=connectionId)
-    except Exception as exc:
-        store.cancel_pending(correlation_id)
-        log.error("Failed to send release request to aggregator", error=str(exc))
-        raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-    log.debug("Inbound SOAP release response", xml=response.text)
+    with store.pending(correlation_id) as release_future:
+        await _send_sync(nsi_client, soap_bytes, "release", Acknowledgment, log, connection_id=connectionId)
     log.info("Release accepted by aggregator, waiting for confirmation")
-
-    sync_msg = parse(response.content)
-    if not isinstance(sync_msg, Acknowledgment):
-        store.cancel_pending(correlation_id)
-        raise HTTPException(
-            status_code=502,
-            detail=_sync_failure_detail(sync_msg),
-        )
 
     store.update_status(connectionId, ReservationStatus.DEACTIVATING)
 
@@ -1222,34 +1179,13 @@ async def _send_terminate(
     """
     log = logger.bind(connection_id=connection_id)
     correlation_id = f"urn:uuid:{uuid4()}"
-    terminate_future = store.register_pending(correlation_id)
-
     header = _operation_header(requester_nsa, correlation_id)
     soap_bytes = build_terminate(header, connection_id)
     log.debug("Outbound SOAP terminate request", xml=soap_bytes.decode())
     log.info("Sending terminate request to aggregator")
 
-    try:
-        try:
-            response = await nsi_client.post(
-                settings.provider_url, content=soap_bytes, headers=soap_headers("terminate")
-            )
-            raise_for_status(response, "terminate", connection_id=connection_id)
-        except Exception as exc:
-            log.error("Failed to send terminate request to aggregator", error=str(exc))
-            raise HTTPException(status_code=502, detail="Failed to reach NSI aggregator") from exc
-
-        log.debug("Inbound SOAP terminate response", xml=response.text)
-        try:
-            sync_msg = parse(response.content)
-        except Exception as exc:
-            log.error("Unparseable terminate response from aggregator", error=str(exc))
-            raise HTTPException(status_code=502, detail="Unparseable response from NSI aggregator") from exc
-        if not isinstance(sync_msg, Acknowledgment):
-            raise HTTPException(status_code=502, detail=_sync_failure_detail(sync_msg))
-    except BaseException:
-        store.cancel_pending(correlation_id)
-        raise
+    with store.pending(correlation_id) as terminate_future:
+        await _send_sync(nsi_client, soap_bytes, "terminate", Acknowledgment, log, connection_id=connection_id)
     log.info("Terminate accepted by aggregator, waiting for confirmation")
     return terminate_future
 

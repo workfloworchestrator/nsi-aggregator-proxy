@@ -17,6 +17,8 @@
 
 import asyncio
 import functools
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -123,6 +125,20 @@ class ReservationStore:
         self._pending[correlation_id] = future
         future.add_done_callback(functools.partial(self._forget_pending, correlation_id))
         return future
+
+    @contextmanager
+    def pending(self, correlation_id: str) -> Iterator[asyncio.Future[NsiMessage]]:
+        """Register a Future for the correlationId, and drop it again if the block raises.
+
+        The Future exists before the block sends anything, so a callback cannot arrive before it does.
+        A block that finishes leaves it registered, for the caller to wait on.
+        """
+        future = self.register_pending(correlation_id)
+        try:
+            yield future
+        except BaseException:
+            self.cancel_pending(correlation_id)
+            raise
 
     def _forget_pending(self, correlation_id: str, future: asyncio.Future[NsiMessage]) -> None:
         """Drop a finished Future, so one whose wait timed out and was cancelled does not stay registered."""

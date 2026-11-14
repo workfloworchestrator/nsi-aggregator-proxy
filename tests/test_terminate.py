@@ -30,6 +30,7 @@ from aggregator_proxy.models import ReservationStatus
 from aggregator_proxy.nsi_soap import build_soap_fault, parse_correlation_id
 from aggregator_proxy.reservation_store import Operation, Reservation, ReservationStore
 from tests.conftest import (
+    UNPARSEABLE,
     build_acknowledgment_xml,
     build_empty_query_summary_sync_response,
     build_message_delivery_timeout_xml,
@@ -44,7 +45,6 @@ from tests.conftest import (
 
 CALLBACK_URL = "http://callback.example.com/result"
 CONNECTION_ID = "test-conn-789"
-_UNPARSEABLE = b"<not-soap"
 
 
 def _terminate_confirmed_xml(correlation_id: str) -> bytes:
@@ -389,7 +389,7 @@ class _Aggregator:
                 case "unavailable":
                     return httpx.Response(503)
                 case "malformed":
-                    return httpx.Response(200, content=_UNPARSEABLE)
+                    return httpx.Response(200, content=UNPARSEABLE)
         if "queryNotificationSync" in body:
             return httpx.Response(200, content=build_query_notification_sync_response(cid, *self.notifications))
         if "querySummarySync" in body:
@@ -404,7 +404,7 @@ class _Aggregator:
         if refused:
             self.lifecycle_state = "Terminated"
         if self.terminates in self.unparseable_acks:
-            return httpx.Response(200, content=_UNPARSEABLE)
+            return httpx.Response(200, content=UNPARSEABLE)
         if refused:
             return httpx.Response(500, content=build_soap_fault("00201: INVALID_TRANSITION"))
         return httpx.Response(200, content=build_acknowledgment_xml(cid))

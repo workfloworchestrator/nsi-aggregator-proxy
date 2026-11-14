@@ -399,6 +399,9 @@ def build_acknowledgment_xml(correlation_id: str) -> bytes:
     return build_soap_envelope("<acknowledgment/>", correlation_id)
 
 
+UNPARSEABLE = b"<not-soap"
+
+
 def get_pending_correlation_id(store: ReservationStore) -> str:
     """Extract the single pending correlation_id from the store."""
     keys = list(store._pending.keys())  # noqa: SLF001

@@ -39,6 +39,26 @@ async def test_wait_that_times_out_is_not_kept(store: ReservationStore) -> None:
 
 
 @pytest.mark.anyio()
+@pytest.mark.parametrize("error", [ValueError, asyncio.CancelledError])
+async def test_pending_block_that_raises_drops_the_future(store: ReservationStore, error: type[BaseException]) -> None:
+    with pytest.raises(error), store.pending(CORRELATION_ID) as future:
+        raise error
+
+    assert future.cancelled()
+    assert not store._pending  # noqa: SLF001
+
+
+@pytest.mark.anyio()
+async def test_pending_block_that_finishes_keeps_the_future_to_wait_on(store: ReservationStore) -> None:
+    with store.pending(CORRELATION_ID) as future:
+        pass
+
+    message = Acknowledgment()
+    assert store.resolve_pending(CORRELATION_ID, message)
+    assert future.result() is message
+
+
+@pytest.mark.anyio()
 async def test_cleanup_leaves_a_future_registered_again_under_the_same_id(store: ReservationStore) -> None:
     """The first future's cleanup runs after the second is registered, and must not remove the second."""
     first = store.register_pending(CORRELATION_ID)

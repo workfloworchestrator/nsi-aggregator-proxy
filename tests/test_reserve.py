@@ -597,6 +597,7 @@ class TestReserveCommitAggregatorUnreachable:
                     assert reservation.status == ReservationStatus.FAILED
                     assert reservation.last_error is not None
                     assert "failed to send reserveCommit" in reservation.last_error
+                    assert not store._pending  # noqa: SLF001
 
 
 class TestReserveCommitTimeout:
